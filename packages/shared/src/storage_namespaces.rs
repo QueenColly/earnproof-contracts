@@ -49,7 +49,7 @@ pub const CONTRACTS: [&str; 3] = ["issuer-registry", "proof-registry", "protocol
 /// Adding a row here is the second half of adding a storage key; the first is
 /// adding the `DataKey` variant. Doing one without the other fails the tests in
 /// `tests/storage-keys/`.
-pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
+pub const STORAGE_NAMESPACES: [StorageNamespace; 95] = [
     StorageNamespace {
         contract: "issuer-registry",
         namespace: "ActiveIssuerCount",
@@ -288,10 +288,6 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         arity: 2,
         class: StorageClass::Persistent,
         value: "SigningKeyLifecycleRecord",
-        namespace: "SigningKeyHistory",
-        arity: 2,
-        class: StorageClass::Persistent,
-        value: "SigningKeyCommitment",
         owner: "registry operator",
     },
     StorageNamespace {
@@ -308,14 +304,6 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         arity: 1,
         class: StorageClass::Persistent,
         value: "u64",
-        namespace: "SigningKeyHistoryCount",
-        arity: 1,
-        class: StorageClass::Persistent,
-        value: "u32",
-        namespace: "RevocationTombstone",
-        arity: 1,
-        class: StorageClass::Persistent,
-        value: "IssuerRevocationTombstone",
         owner: "registry operator",
     },
     StorageNamespace {
@@ -652,10 +640,6 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         arity: 0,
         class: StorageClass::Instance,
         value: "u64",
-        namespace: "PauseAcknowledgementCount",
-        arity: 0,
-        class: StorageClass::Instance,
-        value: "u32",
         owner: "incident operator",
     },
     StorageNamespace {

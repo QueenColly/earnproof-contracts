@@ -118,6 +118,11 @@ pub const LEGACY_PROOF_TYPE: u32 = 0;
 pub const LEGACY_COMMITMENT_ALGORITHM: u32 = 0;
 pub const SHA256_COMMITMENT_ALGORITHM_V1: u32 = 1;
 
+/// Current encoding version for an evidence bundle commitment bound to a
+/// proof. The commitment version is stored with each bundle so the hash and
+/// algorithm remain interpretable even after governance retires an algorithm.
+pub const EVIDENCE_BUNDLE_COMMITMENT_VERSION: u32 = 1;
+
 /// Current encoding version for governed proof-dispute filing windows.
 pub const DISPUTE_FILING_POLICY_VERSION: u32 = 1;
 
@@ -194,6 +199,11 @@ pub struct ProofPayloadRecord {
 pub struct SchemaPolicy {
     pub proof_types: soroban_sdk::Vec<u32>,
     pub max_validity_seconds: u64,
+    /// Whether evidence bundle commitments may be recorded for proofs
+    /// registered under this schema version. Governed explicitly; defaults to
+    /// disabled for legacy schemas and for any version whose policy was never
+    /// written.
+    pub evidence_bundles_enabled: bool,
 }
 
 /// Immutable lifecycle timestamp used as the origin of a dispute filing window.
@@ -290,6 +300,22 @@ pub fn compute_schema_policy_digest(env: &Env, input: &SchemaPolicyDigestInput<'
     )
         .to_xdr(env);
     env.crypto().sha256(&payload).to_bytes()
+}
+
+/// A versioned, opaque commitment to an off-chain evidence bundle linked to a
+/// proof. The evidence bundle and any disclosed claims never enter contract
+/// storage: only the version, algorithm, and digest are recorded.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceBundleCommitment {
+    /// Commitment encoding version ([`EVIDENCE_BUNDLE_COMMITMENT_VERSION`]).
+    pub version: u32,
+    /// Hash algorithm used to compute `hash` (a supported commitment algorithm
+    /// identifier). `LEGACY_COMMITMENT_ALGORITHM` is not a valid bundle
+    /// algorithm and is rejected.
+    pub algorithm: u32,
+    /// Digest over the canonical evidence bundle. Never the bundle itself.
+    pub hash: BytesN<32>,
 }
 
 /// Immutable registration metadata kept separately from `ProofRecord` so
@@ -793,6 +819,15 @@ pub enum ProofError {
     /// The requested subject-nullifier domain version is not currently
     /// supported by protocol governance.
     UnsupportedNullifierDomain = 326,
+    /// The evidence bundle's algorithm is not supported, or its commitment
+    /// version is not recognized by this contract.
+    EvidenceBundleUnsupported = 327,
+    /// The evidence bundle commitment hash is all zeros.
+    EvidenceBundleZeroCommitment = 328,
+    /// An evidence bundle commitment is already recorded for this proof.
+    EvidenceBundleAlreadyCommitted = 329,
+    /// The proof's schema policy does not permit evidence bundle commitments.
+    EvidenceBundlesNotEnabled = 330,
 }
 
 /// Versioned asset identifier accepted by context-aware proof registration.
@@ -1655,6 +1690,10 @@ pub struct ProofRecord {
     /// field is fixed at registration and is never mutated afterward — there
     /// is no operation that moves it, earlier or later.
     pub activates_at: u64,
+    /// Optional, versioned commitment to an off-chain evidence bundle linked
+    /// to this proof. `None` for proofs registered before evidence bundles
+    /// were supported, or for proofs whose issuer has not committed one.
+    pub evidence_bundle: Option<EvidenceBundleCommitment>,
 }
 
 /// The full validity state of a proof, distinguishing every reason a proof
@@ -1840,6 +1879,9 @@ pub struct ArchivedProofRecord {
     pub schema_version: u32,
     pub expired_at: u64,
     pub archived_at: u64,
+    /// Evidence bundle commitment recorded on the proof before archival,
+    /// preserved so the archival record remains self-describing.
+    pub evidence_bundle: Option<EvidenceBundleCommitment>,
 }
 
 /// On-chain record of an approved-but-not-yet-executed contract upgrade,

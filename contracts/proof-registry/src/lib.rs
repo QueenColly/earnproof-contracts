@@ -7,11 +7,12 @@
 use earnproof_shared::{
     is_interface_compatible, ApprovalQuery, ApprovalStatus, ArchivedProofRecord, ContractError,
     DisputeActorClass, DisputeFilingAnchor, DisputeFilingEligibility, DisputeFilingPolicy,
-    DisputeFilingStatus, DisputeRecord, DisputeStatus, GenesisRecord, InterfaceVersion,
-    MigrationStatus, PauseScope, ProofError, ProofPayloadRecord, ProofRecord,
-    ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails, SchemaRateLimit,
-    SchemaRateLimitUsage, SubjectNullifier, TtlStatus, UpgradeApproval, UpgradeApprovalMetadata,
-    UpgradeApprovalRecord, UpgradeHistoryRecord, UpgradeReceipt, MAX_MIGRATION_BATCH,
+    DisputeFilingStatus, DisputeRecord, DisputeStatus, EvidenceBundleCommitment, GenesisRecord,
+    InterfaceVersion, MigrationStatus, PauseScope, ProofError, ProofPayloadRecord, ProofRecord,
+    ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails, SchemaPolicy,
+    SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier, TtlStatus, UpgradeApproval,
+    UpgradeApprovalMetadata, UpgradeApprovalRecord, UpgradeHistoryRecord, UpgradeReceipt,
+    EVIDENCE_BUNDLE_COMMITMENT_VERSION, LEGACY_COMMITMENT_ALGORITHM, MAX_MIGRATION_BATCH,
     MAX_PROOF_BATCH_SIZE, MIGRATION_STATUS_VERSION, TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS,
     UPGRADE_APPROVAL_EXPIRY_LEDGERS, UPGRADE_TIMELOCK_LEDGERS,
 };
@@ -34,9 +35,11 @@ pub trait ProtocolConfigInterface {
     fn is_schema_version_approved(env: Env, version: u32) -> bool;
     fn is_proof_type_approved(env: Env, proof_type: BytesN<32>) -> bool;
     fn get_schema_payload_limit(env: Env, version: u32) -> u32;
+    fn get_schema_policy(env: Env, version: u32) -> SchemaPolicy;
     fn get_schema_rate_limit(env: Env, version: u32) -> SchemaRateLimit;
     fn get_dispute_filing_policy(env: Env) -> DisputeFilingPolicy;
     fn is_nullifier_domain_supported(env: Env, domain_version: u32) -> bool;
+    fn is_algorithm_supported(env: Env, algorithm: u32) -> bool;
     fn interface_version(env: Env) -> InterfaceVersion;
 }
 
@@ -232,6 +235,19 @@ pub struct ProofRegisteredInBatch {
 pub struct ProofRevokedInBatch {
     pub proof_id_hash: BytesN<32>,
     pub revoked_by: Address,
+}
+
+/// Emitted when an issuer records a versioned evidence bundle commitment on a
+/// proof. Only the bundle's version, algorithm, and digest are emitted —
+/// never the bundle or any disclosed claim.
+#[contractevent]
+pub struct EvidenceBundleCommitted {
+    pub proof_id_hash: BytesN<32>,
+    pub issuer_address: Address,
+    pub commitment_version: u32,
+    pub algorithm: u32,
+    pub bundle_hash: BytesN<32>,
+    pub epoch: u32,
 }
 
 // ── dispute events ───────────────────────────────────────────────────────────
@@ -803,6 +819,7 @@ impl ProofRegistryContract {
             sequence_number,
             created_ledger,
             activates_at: 0,
+            evidence_bundle: None,
         };
 
         env.storage().persistent().set(&key, &record);
@@ -969,7 +986,8 @@ impl ProofRegistryContract {
             proof_type: None,
             sequence_number,
             created_ledger,
-            activates_at: 0,
+            activates_at,
+            evidence_bundle: None,
         };
         env.storage().persistent().set(&key, &record);
         Self::extend_proof_key_ttl(env.clone(), &key);
@@ -1137,6 +1155,7 @@ impl ProofRegistryContract {
             predecessor_id_hash: None,
             proof_type: None,
             sequence_number,
+            evidence_bundle: None,
         };
 
         env.storage().persistent().set(&key, &record);
@@ -1246,6 +1265,7 @@ impl ProofRegistryContract {
                 predecessor_id_hash: None,
                 proof_type: None,
                 sequence_number,
+                evidence_bundle: None,
             };
 
             env.storage().persistent().set(&key, &record);
@@ -1268,6 +1288,85 @@ impl ProofRegistryContract {
         }
 
         Ok(())
+    }
+
+    /// Records a versioned evidence bundle commitment on an existing proof.
+    ///
+    /// The commitment is governed by the proof's schema policy: the policy
+    /// must explicitly enable evidence bundles (`set_schema_evidence_bundle_policy`
+    /// on protocol-config), and the caller must be the proof's issuer. The
+    /// bundle's version must match [`EVIDENCE_BUNDLE_COMMITMENT_VERSION`], its
+    /// hash must be non-zero, and its algorithm must be a supported commitment
+    /// algorithm. A proof may hold at most one bundle commitment, so
+    /// re-committing is rejected.
+    ///
+    /// Only the version, algorithm, and digest are stored or emitted — the
+    /// evidence bundle and any disclosed claims never enter contract storage
+    /// or events.
+    pub fn commit_evidence_bundle(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+        bundle: EvidenceBundleCommitment,
+    ) -> Result<(), ProofError> {
+        Self::ensure_not_decommissioned(&env)?;
+        let key = DataKey::Proof(proof_id_hash.clone());
+        let mut record: ProofRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ProofError::ProofNotFound)?;
+
+        if record.evidence_bundle.is_some() {
+            return Err(ProofError::EvidenceBundleAlreadyCommitted);
+        }
+
+        Self::require_auth(&record.issuer_address);
+
+        let protocol_config =
+            Self::get_protocol_config(env.clone()).map_err(|_| ProofError::ProofNotFound)?;
+        let protocol_client = ProtocolConfigContractClient::new(&env, &protocol_config);
+        let policy = protocol_client.get_schema_policy(&record.schema_version);
+        if !policy.evidence_bundles_enabled {
+            return Err(ProofError::EvidenceBundlesNotEnabled);
+        }
+
+        if bundle.version != EVIDENCE_BUNDLE_COMMITMENT_VERSION {
+            return Err(ProofError::EvidenceBundleUnsupported);
+        }
+        if bundle.hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(ProofError::EvidenceBundleZeroCommitment);
+        }
+        if bundle.algorithm == LEGACY_COMMITMENT_ALGORITHM
+            || !protocol_client.is_algorithm_supported(&bundle.algorithm)
+        {
+            return Err(ProofError::EvidenceBundleUnsupported);
+        }
+
+        record.evidence_bundle = Some(bundle.clone());
+        env.storage().persistent().set(&key, &record);
+        Self::extend_proof_key_ttl(env.clone(), &key);
+
+        let epoch = Self::bump_registry_epoch(&env);
+        EvidenceBundleCommitted {
+            proof_id_hash,
+            issuer_address: record.issuer_address.clone(),
+            commitment_version: bundle.version,
+            algorithm: bundle.algorithm,
+            bundle_hash: bundle.hash,
+            epoch,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Returns the evidence bundle commitment recorded for a proof, if any.
+    /// Never the bundle or any disclosed claim.
+    pub fn get_proof_evidence_bundle(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+    ) -> Result<Option<EvidenceBundleCommitment>, ProofError> {
+        let record = Self::get_proof(env.clone(), proof_id_hash)?;
+        Ok(record.evidence_bundle)
     }
 
     pub fn revoke_proof(env: Env, proof_id_hash: BytesN<32>) -> Result<(), ProofError> {
@@ -1344,6 +1443,7 @@ impl ProofRegistryContract {
             schema_version: record.schema_version,
             expired_at: record.expires_at,
             archived_at: now,
+            evidence_bundle: record.evidence_bundle.clone(),
         };
 
         env.storage()
@@ -4727,6 +4827,7 @@ mod test {
             sequence_number: 0,
             created_ledger: 0,
             activates_at: 0,
+            evidence_bundle: None,
         };
         env.as_contract(&client.address, || {
             env.storage()
