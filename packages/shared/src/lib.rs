@@ -121,6 +121,16 @@ pub const SHA256_COMMITMENT_ALGORITHM_V1: u32 = 1;
 /// Current encoding version for governed proof-dispute filing windows.
 pub const DISPUTE_FILING_POLICY_VERSION: u32 = 1;
 
+/// Current encoding version for terminal dispute decision reasons.
+pub const DISPUTE_DECISION_REASON_VERSION: u32 = 1;
+
+/// Version-1 dispute reason codes. The reason text itself is never stored.
+pub const DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM: u32 = 1;
+pub const DISPUTE_REASON_CLAIM_UNSUBSTANTIATED: u32 = 2;
+pub const DISPUTE_REASON_DUPLICATE: u32 = 3;
+pub const DISPUTE_REASON_OUT_OF_SCOPE: u32 = 4;
+pub const DISPUTE_REASON_PROCEDURAL: u32 = 5;
+
 /// Governed, fixed-size issuance policy for one schema version.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -793,6 +803,9 @@ pub enum ProofError {
     /// The requested subject-nullifier domain version is not currently
     /// supported by protocol governance.
     UnsupportedNullifierDomain = 326,
+    /// A terminal dispute decision supplied an unsupported reason version or
+    /// a reason code not permitted for that decision outcome.
+    InvalidDisputeReason = 327,
 }
 
 /// Versioned asset identifier accepted by context-aware proof registration.
@@ -1789,6 +1802,34 @@ pub struct DisputeRecord {
     pub updated_by: Address,
     pub updated_by_class: DisputeActorClass,
     pub updated_at: u64,
+}
+
+/// Versioned reason input for a resolve or reject decision. `reason_commitment`
+/// may commit to off-chain rationale, but must never contain evidence or text.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeDecisionReason {
+    pub version: u32,
+    pub code: u32,
+    pub reason_commitment: Option<BytesN<32>>,
+}
+
+/// Role recorded for the authorized resolver of a terminal decision.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DisputeResolverRole {
+    Admin,
+}
+
+/// Immutable audit metadata for a resolved or rejected dispute.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeDecisionMetadata {
+    pub reason: DisputeDecisionReason,
+    pub resolver: Address,
+    pub resolver_role: DisputeResolverRole,
+    pub ledger: u32,
+    pub timestamp: u64,
 }
 
 #[contracttype]

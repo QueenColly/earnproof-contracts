@@ -49,7 +49,7 @@ pub const CONTRACTS: [&str; 3] = ["issuer-registry", "proof-registry", "protocol
 /// Adding a row here is the second half of adding a storage key; the first is
 /// adding the `DataKey` variant. Doing one without the other fails the tests in
 /// `tests/storage-keys/`.
-pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
+pub const STORAGE_NAMESPACES: [StorageNamespace; 100] = [
     StorageNamespace {
         contract: "issuer-registry",
         namespace: "ActiveIssuerCount",
@@ -288,6 +288,10 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         arity: 2,
         class: StorageClass::Persistent,
         value: "SigningKeyLifecycleRecord",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
         namespace: "SigningKeyHistory",
         arity: 2,
         class: StorageClass::Persistent,
@@ -308,10 +312,18 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         arity: 1,
         class: StorageClass::Persistent,
         value: "u64",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
         namespace: "SigningKeyHistoryCount",
         arity: 1,
         class: StorageClass::Persistent,
         value: "u32",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
         namespace: "RevocationTombstone",
         arity: 1,
         class: StorageClass::Persistent,
@@ -373,6 +385,14 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         class: StorageClass::Persistent,
         value: "DisputeRecord",
         owner: "disputing party",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
+        namespace: "DisputeDecisionMetadata",
+        arity: 1,
+        class: StorageClass::Persistent,
+        value: "DisputeDecisionMetadata",
+        owner: "authorized resolver",
     },
     StorageNamespace {
         contract: "proof-registry",
@@ -652,6 +672,10 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 66] = [
         arity: 0,
         class: StorageClass::Instance,
         value: "u64",
+        owner: "protocol operator",
+    },
+    StorageNamespace {
+        contract: "protocol-config",
         namespace: "PauseAcknowledgementCount",
         arity: 0,
         class: StorageClass::Instance,

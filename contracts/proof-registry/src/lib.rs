@@ -6,14 +6,17 @@
 #[allow(unused_imports)]
 use earnproof_shared::{
     is_interface_compatible, ApprovalQuery, ApprovalStatus, ArchivedProofRecord, ContractError,
-    DisputeActorClass, DisputeFilingAnchor, DisputeFilingEligibility, DisputeFilingPolicy,
-    DisputeFilingStatus, DisputeRecord, DisputeStatus, GenesisRecord, InterfaceVersion,
-    MigrationStatus, PauseScope, ProofError, ProofPayloadRecord, ProofRecord,
-    ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails, SchemaRateLimit,
-    SchemaRateLimitUsage, SubjectNullifier, TtlStatus, UpgradeApproval, UpgradeApprovalMetadata,
-    UpgradeApprovalRecord, UpgradeHistoryRecord, UpgradeReceipt, MAX_MIGRATION_BATCH,
-    MAX_PROOF_BATCH_SIZE, MIGRATION_STATUS_VERSION, TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS,
-    UPGRADE_APPROVAL_EXPIRY_LEDGERS, UPGRADE_TIMELOCK_LEDGERS,
+    DisputeActorClass, DisputeDecisionMetadata, DisputeDecisionReason, DisputeFilingAnchor,
+    DisputeFilingEligibility, DisputeFilingPolicy, DisputeFilingStatus, DisputeRecord,
+    DisputeResolverRole, DisputeStatus, GenesisRecord, InterfaceVersion, MigrationStatus,
+    PauseScope, ProofError, ProofPayloadRecord, ProofRecord, ProofRegistrationInput, ProofStatus,
+    ProofValidity, ProofValidityDetails, SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier,
+    TtlStatus, UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord,
+    UpgradeHistoryRecord, UpgradeReceipt, DISPUTE_DECISION_REASON_VERSION,
+    DISPUTE_REASON_CLAIM_UNSUBSTANTIATED, DISPUTE_REASON_DUPLICATE,
+    DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM, DISPUTE_REASON_OUT_OF_SCOPE, DISPUTE_REASON_PROCEDURAL,
+    MAX_MIGRATION_BATCH, MAX_PROOF_BATCH_SIZE, MIGRATION_STATUS_VERSION, TTL_EXTEND_TO_LEDGERS,
+    TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS, UPGRADE_TIMELOCK_LEDGERS,
 };
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
@@ -51,6 +54,7 @@ pub struct ProofRegistryContract;
 
 /// Internal selector for the shared terminal-transition logic in
 /// `transition_dispute`. Not exposed across the contract boundary.
+#[derive(Copy, Clone)]
 enum DisputeTransition {
     Withdraw,
     Resolve,
@@ -117,6 +121,9 @@ enum DataKey {
     PauseAcknowledgementCount,
     /// Versioned, opaque subject-nullifier commitment bound to one proof.
     SubjectNullifier(BytesN<32>),
+    /// Versioned terminal decision metadata, stored separately to preserve
+    /// compatibility with existing serialized DisputeRecord values.
+    DisputeDecisionMetadata(BytesN<32>),
 }
 
 #[contractevent]
@@ -270,6 +277,20 @@ pub struct DisputeRejected {
     pub rejected_by: Address,
     pub rejected_by_class: DisputeActorClass,
     pub rejected_at: u64,
+}
+
+/// Version-2 decision event carrying the complete immutable reason and resolver metadata.
+#[contractevent]
+pub struct DisputeDecisionCommittedV2 {
+    pub proof_id_hash: BytesN<32>,
+    pub decision_status: DisputeStatus,
+    pub reason_version: u32,
+    pub reason_code: u32,
+    pub reason_commitment: Option<BytesN<32>>,
+    pub resolver: Address,
+    pub resolver_role: DisputeResolverRole,
+    pub ledger: u32,
+    pub timestamp: u64,
 }
 
 // ── registry epoch events ────────────────────────────────────────────────────
@@ -1581,6 +1602,9 @@ impl ProofRegistryContract {
 
         let dispute_key = DataKey::Dispute(proof_id_hash.clone());
         env.storage().persistent().set(&dispute_key, &record);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeDecisionMetadata(proof_id_hash.clone()));
         Self::extend_proof_key_ttl(env.clone(), &dispute_key);
 
         DisputeOpened {
@@ -1612,17 +1636,27 @@ impl ProofRegistryContract {
     /// withdraw it — not the admin, and not the proof's issuer unless the
     /// issuer is the one who opened it.
     pub fn withdraw_dispute(env: Env, proof_id_hash: BytesN<32>) -> Result<(), ProofError> {
-        Self::transition_dispute(env, proof_id_hash, DisputeTransition::Withdraw)
+        Self::transition_dispute(env, proof_id_hash, DisputeTransition::Withdraw, None)
     }
 
-    /// Admin-only: resolves an open dispute in the disputant's favor.
-    pub fn resolve_dispute(env: Env, proof_id_hash: BytesN<32>) -> Result<(), ProofError> {
-        Self::transition_dispute(env, proof_id_hash, DisputeTransition::Resolve)
+    /// Admin-only: resolves an open dispute in the disputant's favor with a
+    /// versioned reason code and optional off-chain reason commitment.
+    pub fn resolve_dispute(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+        reason: DisputeDecisionReason,
+    ) -> Result<(), ProofError> {
+        Self::transition_dispute(env, proof_id_hash, DisputeTransition::Resolve, Some(reason))
     }
 
-    /// Admin-only: rejects an open dispute as without merit.
-    pub fn reject_dispute(env: Env, proof_id_hash: BytesN<32>) -> Result<(), ProofError> {
-        Self::transition_dispute(env, proof_id_hash, DisputeTransition::Reject)
+    /// Admin-only: rejects an open dispute with a versioned reason code and
+    /// optional off-chain reason commitment.
+    pub fn reject_dispute(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+        reason: DisputeDecisionReason,
+    ) -> Result<(), ProofError> {
+        Self::transition_dispute(env, proof_id_hash, DisputeTransition::Reject, Some(reason))
     }
 
     /// Returns the current dispute record for a proof, if one exists.
@@ -1635,6 +1669,25 @@ impl ProofRegistryContract {
             .ok_or(ProofError::DisputeNotFound)?;
         Self::extend_proof_key_ttl(env, &key);
         Ok(record)
+    }
+
+    /// Returns immutable resolver and reason metadata for a terminal decision.
+    /// `None` is returned for open, withdrawn, or legacy terminal disputes.
+    pub fn get_dispute_decision_metadata(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+    ) -> Result<Option<DisputeDecisionMetadata>, ProofError> {
+        let dispute_key = DataKey::Dispute(proof_id_hash.clone());
+        if !env.storage().persistent().has(&dispute_key) {
+            return Err(ProofError::DisputeNotFound);
+        }
+        Self::extend_proof_key_ttl(env.clone(), &dispute_key);
+        let key = DataKey::DisputeDecisionMetadata(proof_id_hash);
+        let metadata = env.storage().persistent().get(&key);
+        if metadata.is_some() {
+            Self::extend_proof_key_ttl(env, &key);
+        }
+        Ok(metadata)
     }
 
     pub fn nominate_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
@@ -2853,6 +2906,7 @@ impl ProofRegistryContract {
         env: Env,
         proof_id_hash: BytesN<32>,
         transition: DisputeTransition,
+        reason: Option<DisputeDecisionReason>,
     ) -> Result<(), ProofError> {
         Self::ensure_not_decommissioned(&env)?;
         if let Ok(protocol_config) = Self::get_protocol_config(env.clone()) {
@@ -2893,6 +2947,25 @@ impl ProofRegistryContract {
             }
         };
 
+        let decision_metadata = match transition {
+            DisputeTransition::Withdraw => None,
+            DisputeTransition::Resolve | DisputeTransition::Reject => {
+                let reason = reason.ok_or(ProofError::InvalidDisputeReason)?;
+                if reason.version != DISPUTE_DECISION_REASON_VERSION
+                    || !Self::is_valid_dispute_reason(transition, reason.code)
+                {
+                    return Err(ProofError::InvalidDisputeReason);
+                }
+                Some(DisputeDecisionMetadata {
+                    reason,
+                    resolver: actor.clone(),
+                    resolver_role: DisputeResolverRole::Admin,
+                    ledger: env.ledger().sequence(),
+                    timestamp: env.ledger().timestamp(),
+                })
+            }
+        };
+
         let proof_key = DataKey::Proof(proof_id_hash.clone());
         let proof: ProofRecord = env
             .storage()
@@ -2909,6 +2982,12 @@ impl ProofRegistryContract {
         env.storage().persistent().set(&key, &record);
         Self::extend_proof_key_ttl(env.clone(), &key);
 
+        if let Some(metadata) = &decision_metadata {
+            let metadata_key = DataKey::DisputeDecisionMetadata(proof_id_hash.clone());
+            env.storage().persistent().set(&metadata_key, metadata);
+            Self::extend_proof_key_ttl(env.clone(), &metadata_key);
+        }
+
         match transition {
             DisputeTransition::Withdraw => DisputeWithdrawn {
                 proof_id_hash,
@@ -2917,23 +2996,74 @@ impl ProofRegistryContract {
                 withdrawn_at: now,
             }
             .publish(&env),
-            DisputeTransition::Resolve => DisputeResolved {
-                proof_id_hash,
-                resolved_by: actor,
-                resolved_by_class: actor_class,
-                resolved_at: now,
+            DisputeTransition::Resolve => {
+                DisputeResolved {
+                    proof_id_hash: proof_id_hash.clone(),
+                    resolved_by: actor.clone(),
+                    resolved_by_class: actor_class,
+                    resolved_at: now,
+                }
+                .publish(&env);
+                Self::publish_dispute_decision_v2(
+                    &env,
+                    proof_id_hash,
+                    new_status,
+                    decision_metadata,
+                );
             }
-            .publish(&env),
-            DisputeTransition::Reject => DisputeRejected {
-                proof_id_hash,
-                rejected_by: actor,
-                rejected_by_class: actor_class,
-                rejected_at: now,
+            DisputeTransition::Reject => {
+                DisputeRejected {
+                    proof_id_hash: proof_id_hash.clone(),
+                    rejected_by: actor.clone(),
+                    rejected_by_class: actor_class,
+                    rejected_at: now,
+                }
+                .publish(&env);
+                Self::publish_dispute_decision_v2(
+                    &env,
+                    proof_id_hash,
+                    new_status,
+                    decision_metadata,
+                );
             }
-            .publish(&env),
         }
 
         Ok(())
+    }
+
+    fn is_valid_dispute_reason(transition: DisputeTransition, code: u32) -> bool {
+        match transition {
+            DisputeTransition::Withdraw => false,
+            DisputeTransition::Resolve => code == DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM,
+            DisputeTransition::Reject => matches!(
+                code,
+                DISPUTE_REASON_CLAIM_UNSUBSTANTIATED
+                    | DISPUTE_REASON_DUPLICATE
+                    | DISPUTE_REASON_OUT_OF_SCOPE
+                    | DISPUTE_REASON_PROCEDURAL
+            ),
+        }
+    }
+
+    fn publish_dispute_decision_v2(
+        env: &Env,
+        proof_id_hash: BytesN<32>,
+        decision_status: DisputeStatus,
+        metadata: Option<DisputeDecisionMetadata>,
+    ) {
+        let metadata = metadata.expect("resolve and reject always carry validated metadata");
+        DisputeDecisionCommittedV2 {
+            proof_id_hash,
+            decision_status,
+            reason_version: metadata.reason.version,
+            reason_code: metadata.reason.code,
+            reason_commitment: metadata.reason.reason_commitment,
+            resolver: metadata.resolver,
+            resolver_role: metadata.resolver_role,
+            ledger: metadata.ledger,
+            timestamp: metadata.timestamp,
+        }
+        .publish(env);
     }
 
     fn bump_registry_epoch(env: &Env) -> u32 {
@@ -2962,12 +3092,10 @@ mod test {
 
     use super::{DataKey, ProofRegistryContract, ProofRegistryContractClient};
     use earnproof_shared::{
-        AdminTransferState, ContractError, DisputeActorClass, DisputeStatus, PauseScope,
-        ProofError, ProofRecord, ProofStatus, ProofValidity, ADMIN_TRANSFER_EXPIRY_LEDGERS,
-        MAX_PROOF_BATCH_SIZE, TTL_THRESHOLD_LEDGERS, UPGRADE_TIMELOCK_LEDGERS,
-        DisputeActorClass, DisputeStatus, PauseScope, ProofError, ProofRecord, ProofStatus,
-        ProofValidity, SubjectNullifier, MAX_PROOF_BATCH_SIZE, TTL_THRESHOLD_LEDGERS,
-        UPGRADE_TIMELOCK_LEDGERS,
+        AdminTransferState, ContractError, DisputeActorClass, DisputeDecisionReason, DisputeRecord,
+        DisputeStatus, PauseScope, ProofError, ProofRecord, ProofStatus, ProofValidity,
+        SubjectNullifier, ADMIN_TRANSFER_EXPIRY_LEDGERS, MAX_PROOF_BATCH_SIZE,
+        TTL_THRESHOLD_LEDGERS, UPGRADE_TIMELOCK_LEDGERS,
     };
     use issuer_registry::{IssuerRegistryContract, IssuerRegistryContractClient};
     use protocol_config::{ProtocolConfigContract, ProtocolConfigContractClient};
@@ -2982,6 +3110,22 @@ mod test {
 
     fn bytes(env: &Env, value: u8) -> BytesN<32> {
         BytesN::from_array(env, &[value; 32])
+    }
+
+    fn resolve_reason() -> DisputeDecisionReason {
+        DisputeDecisionReason {
+            version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+            code: earnproof_shared::DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM,
+            reason_commitment: None,
+        }
+    }
+
+    fn reject_reason() -> DisputeDecisionReason {
+        DisputeDecisionReason {
+            version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+            code: earnproof_shared::DISPUTE_REASON_CLAIM_UNSUBSTANTIATED,
+            reason_commitment: None,
+        }
     }
 
     fn setup() -> (
@@ -6014,7 +6158,7 @@ mod test {
         );
 
         client.open_dispute(&proof_id, &issuer, &bytes(&env, 30));
-        client.withdraw_dispute(&proof_id);
+        client.resolve_dispute(&proof_id, &resolve_reason());
 
         // Withdrawn is terminal, not blocking: a new dispute may be opened.
         client.open_dispute(&proof_id, &third_party, &bytes(&env, 31));
@@ -6022,6 +6166,7 @@ mod test {
         assert_eq!(dispute.status, DisputeStatus::Open);
         assert_eq!(dispute.opened_by, third_party);
         assert_eq!(dispute.evidence_commitment, bytes(&env, 31));
+        assert_eq!(client.get_dispute_decision_metadata(&proof_id), None);
     }
 
     #[test]
@@ -6139,7 +6284,7 @@ mod test {
 
         env.set_auths(&[]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.resolve_dispute(&proof_id);
+            client.resolve_dispute(&proof_id, &resolve_reason());
         }));
         assert!(
             result.is_err(),
@@ -6147,20 +6292,69 @@ mod test {
         );
 
         env.mock_all_auths();
-        client.resolve_dispute(&proof_id);
+        client.resolve_dispute(&proof_id, &resolve_reason());
         let dispute = client.get_dispute(&proof_id);
         assert_eq!(dispute.status, DisputeStatus::Resolved);
         assert_eq!(dispute.updated_by, admin);
         assert_eq!(dispute.updated_by_class, DisputeActorClass::Admin);
 
+        let metadata = client
+            .get_dispute_decision_metadata(&proof_id)
+            .expect("resolved disputes expose decision metadata");
+        assert_eq!(metadata.reason, resolve_reason());
+        assert_eq!(metadata.resolver, admin);
+        assert_eq!(
+            metadata.resolver_role,
+            earnproof_shared::DisputeResolverRole::Admin
+        );
+        assert_eq!(metadata.ledger, env.ledger().sequence());
+        assert_eq!(metadata.timestamp, env.ledger().timestamp());
+
         // Terminal: cannot be resolved or rejected again.
         assert_eq!(
-            client.try_resolve_dispute(&proof_id),
+            client.try_resolve_dispute(&proof_id, &resolve_reason()),
             Err(Ok(ProofError::DisputeNotOpen))
         );
         assert_eq!(
-            client.try_reject_dispute(&proof_id),
+            client.try_reject_dispute(&proof_id, &reject_reason()),
             Err(Ok(ProofError::DisputeNotOpen))
+        );
+        assert_eq!(
+            client.get_dispute_decision_metadata(&proof_id),
+            Some(metadata),
+            "a replayed terminal decision must not alter its original commitment"
+        );
+    }
+
+    #[test]
+    fn competing_terminal_decisions_preserve_the_first_commitment() {
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let proof_id = bytes(&env, 1);
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 2),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 30));
+
+        let committed_reason = resolve_reason();
+        client.resolve_dispute(&proof_id, &committed_reason);
+        let committed_metadata = client
+            .get_dispute_decision_metadata(&proof_id)
+            .expect("the winning decision must persist its audit metadata");
+
+        assert_eq!(
+            client.try_reject_dispute(&proof_id, &reject_reason()),
+            Err(Ok(ProofError::DisputeNotOpen))
+        );
+        assert_eq!(
+            client.get_dispute_decision_metadata(&proof_id),
+            Some(committed_metadata)
         );
     }
 
@@ -6183,7 +6377,7 @@ mod test {
 
         env.set_auths(&[]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.reject_dispute(&proof_id);
+            client.reject_dispute(&proof_id, &reject_reason());
         }));
         assert!(
             result.is_err(),
@@ -6191,7 +6385,7 @@ mod test {
         );
 
         env.mock_all_auths();
-        client.reject_dispute(&proof_id);
+        client.reject_dispute(&proof_id, &reject_reason());
         let dispute = client.get_dispute(&proof_id);
         assert_eq!(dispute.status, DisputeStatus::Rejected);
         assert_eq!(dispute.updated_by, admin);
@@ -6214,25 +6408,142 @@ mod test {
         );
 
         assert_eq!(
-            client.try_resolve_dispute(&proof_id),
+            client.try_resolve_dispute(&proof_id, &resolve_reason()),
             Err(Ok(ProofError::DisputeNotFound))
         );
         assert_eq!(
-            client.try_reject_dispute(&proof_id),
+            client.try_reject_dispute(&proof_id, &reject_reason()),
             Err(Ok(ProofError::DisputeNotFound))
         );
 
         client.open_dispute(&proof_id, &issuer, &bytes(&env, 30));
-        client.resolve_dispute(&proof_id);
+        client.resolve_dispute(&proof_id, &resolve_reason());
 
         assert_eq!(
-            client.try_resolve_dispute(&proof_id),
+            client.try_resolve_dispute(&proof_id, &resolve_reason()),
             Err(Ok(ProofError::DisputeNotOpen))
         );
         assert_eq!(
-            client.try_reject_dispute(&proof_id),
+            client.try_reject_dispute(&proof_id, &reject_reason()),
             Err(Ok(ProofError::DisputeNotOpen))
         );
+    }
+
+    #[test]
+    fn dispute_decision_reason_policy_rejects_unknown_versions_and_codes() {
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let proof_id = bytes(&env, 1);
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 2),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 30));
+
+        let mut reason = resolve_reason();
+        reason.version += 1;
+        assert_eq!(
+            client.try_resolve_dispute(&proof_id, &reason),
+            Err(Ok(ProofError::InvalidDisputeReason))
+        );
+
+        reason = resolve_reason();
+        reason.code = u32::MAX;
+        assert_eq!(
+            client.try_resolve_dispute(&proof_id, &reason),
+            Err(Ok(ProofError::InvalidDisputeReason))
+        );
+
+        reason = reject_reason();
+        reason.code = earnproof_shared::DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM;
+        assert_eq!(
+            client.try_reject_dispute(&proof_id, &reason),
+            Err(Ok(ProofError::InvalidDisputeReason))
+        );
+        assert_eq!(client.get_dispute(&proof_id).status, DisputeStatus::Open);
+        assert_eq!(client.get_dispute_decision_metadata(&proof_id), None);
+    }
+
+    #[test]
+    fn another_authorized_address_cannot_resolve_as_the_admin() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let other = Address::generate(&env);
+        let proof_id = bytes(&env, 1);
+        let reason = resolve_reason();
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 2),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 30));
+
+        let auth_entry = MockAuth {
+            address: &other,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "resolve_dispute",
+                args: (proof_id.clone(), reason.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        };
+        env.set_auths(&[]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client
+                .mock_auths(&[auth_entry])
+                .resolve_dispute(&proof_id, &reason);
+        }));
+        assert!(result.is_err(), "only the configured admin may resolve");
+        assert_eq!(client.get_dispute(&proof_id).status, DisputeStatus::Open);
+        assert_eq!(client.get_dispute_decision_metadata(&proof_id), None);
+    }
+
+    #[test]
+    fn legacy_dispute_records_remain_readable_without_decision_metadata() {
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let proof_id = bytes(&env, 1);
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 2),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+
+        let legacy = DisputeRecord {
+            proof_id_hash: proof_id.clone(),
+            evidence_commitment: bytes(&env, 30),
+            status: DisputeStatus::Resolved,
+            opened_by: issuer.clone(),
+            opened_by_class: DisputeActorClass::Issuer,
+            opened_at: 1_000,
+            updated_by: Address::from_str(&env, ADMIN),
+            updated_by_class: DisputeActorClass::Admin,
+            updated_at: 1_001,
+        };
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Dispute(proof_id.clone()), &legacy);
+        });
+
+        assert_eq!(client.get_dispute(&proof_id), legacy);
+        assert_eq!(client.get_dispute_decision_metadata(&proof_id), None);
     }
 
     #[test]
@@ -6240,6 +6551,10 @@ mod test {
         let (env, client, _pc, _ir, _ir_id) = setup();
         let result = client.try_get_dispute(&bytes(&env, 99));
         assert_eq!(result, Err(Ok(ProofError::DisputeNotFound)));
+        assert_eq!(
+            client.try_get_dispute_decision_metadata(&bytes(&env, 99)),
+            Err(Ok(ProofError::DisputeNotFound))
+        );
     }
 
     #[test]
@@ -6271,7 +6586,7 @@ mod test {
         assert_eq!(client.get_dispute(&proof_id).status, DisputeStatus::Open);
 
         // Resolving the dispute afterward does not un-revoke the proof.
-        client.resolve_dispute(&proof_id);
+        client.resolve_dispute(&proof_id, &resolve_reason());
         assert_eq!(
             client.get_dispute(&proof_id).status,
             DisputeStatus::Resolved
@@ -6329,11 +6644,11 @@ mod test {
             Err(Ok(ProofError::ContractPaused))
         );
         assert_eq!(
-            client.try_resolve_dispute(&proof_id),
+            client.try_resolve_dispute(&proof_id, &resolve_reason()),
             Err(Ok(ProofError::ContractPaused))
         );
         assert_eq!(
-            client.try_reject_dispute(&proof_id),
+            client.try_reject_dispute(&proof_id, &reject_reason()),
             Err(Ok(ProofError::ContractPaused))
         );
 
@@ -6377,11 +6692,11 @@ mod test {
             Err(Ok(ProofError::ProofNotFound))
         );
         assert_eq!(
-            client.try_resolve_dispute(&proof_id),
+            client.try_resolve_dispute(&proof_id, &resolve_reason()),
             Err(Ok(ProofError::ProofNotFound))
         );
         assert_eq!(
-            client.try_reject_dispute(&proof_id),
+            client.try_reject_dispute(&proof_id, &reject_reason()),
             Err(Ok(ProofError::ProofNotFound))
         );
     }

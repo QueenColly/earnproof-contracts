@@ -10,6 +10,7 @@
 //! documentation that happened to be true once.
 
 use crate::harness::{hash, read_events, Deployment, ObservedEvent, APPROVED_SCHEMA};
+use earnproof_shared::DisputeDecisionReason;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env, Symbol, TryFromVal, Val};
 
@@ -152,6 +153,38 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "policy_hash",
             "receipt_version",
             "commitment_hash",
+        ],
+    ),
+    (
+        "dispute_resolved",
+        &[
+            "proof_id_hash",
+            "resolved_by",
+            "resolved_by_class",
+            "resolved_at",
+        ],
+    ),
+    (
+        "dispute_rejected",
+        &[
+            "proof_id_hash",
+            "rejected_by",
+            "rejected_by_class",
+            "rejected_at",
+        ],
+    ),
+    (
+        "dispute_decision_committed_v2",
+        &[
+            "proof_id_hash",
+            "decision_status",
+            "reason_version",
+            "reason_code",
+            "reason_commitment",
+            "resolver",
+            "resolver_role",
+            "ledger",
+            "timestamp",
         ],
     ),
 ];
@@ -328,6 +361,95 @@ fn proof_registry_events_match_their_fixtures() {
     let admin_revoked = deployment.register_proof(0x22);
     for event in deployment.capture(|| deployment.proofs.admin_revoke_proof(&admin_revoked)) {
         assert_matches_fixture(&deployment.env, &event);
+    }
+}
+
+#[test]
+fn dispute_resolution_preserves_v1_and_emits_v2_metadata_event() {
+    let deployment = Deployment::new();
+    let proof_id = deployment.register_proof(0x25);
+    deployment
+        .proofs
+        .open_dispute(&proof_id, &deployment.issuer, &hash(&deployment.env, 0x26));
+    let reason = DisputeDecisionReason {
+        version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+        code: earnproof_shared::DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM,
+        reason_commitment: Some(hash(&deployment.env, 0x27)),
+    };
+    let events = deployment.capture(|| {
+        deployment.proofs.resolve_dispute(&proof_id, &reason);
+    });
+
+    assert_eq!(
+        events.len(),
+        2,
+        "both compatibility event versions are emitted"
+    );
+    for event in &events {
+        assert_matches_fixture(&deployment.env, event);
+    }
+
+    let v1 = events
+        .iter()
+        .find(|event| event.is(&deployment.env, "dispute_resolved"))
+        .expect("legacy resolution event remains available");
+    assert_eq!(v1.field_count(&deployment.env), 4);
+
+    let v2 = events
+        .iter()
+        .find(|event| event.is(&deployment.env, "dispute_decision_committed_v2"))
+        .expect("version-2 decision event is emitted");
+    assert_eq!(v2.field_count(&deployment.env), 9);
+    assert_eq!(
+        v2.field::<earnproof_shared::DisputeStatus>(&deployment.env, "decision_status"),
+        Some(earnproof_shared::DisputeStatus::Resolved)
+    );
+    assert_eq!(v2.field::<u32>(&deployment.env, "reason_version"), Some(1));
+    assert_eq!(v2.field::<u32>(&deployment.env, "reason_code"), Some(1));
+    assert_eq!(
+        v2.field::<Option<soroban_sdk::BytesN<32>>>(&deployment.env, "reason_commitment"),
+        reason.reason_commitment
+    );
+    assert_eq!(
+        v2.field::<u32>(&deployment.env, "ledger"),
+        Some(deployment.env.ledger().sequence())
+    );
+    assert_eq!(
+        v2.field::<u64>(&deployment.env, "timestamp"),
+        Some(deployment.env.ledger().timestamp())
+    );
+    let metadata = deployment
+        .proofs
+        .get_dispute_decision_metadata(&proof_id)
+        .expect("decision metadata is queryable");
+    assert_eq!(
+        v2.field::<Address>(&deployment.env, "resolver"),
+        Some(metadata.resolver)
+    );
+    assert_eq!(
+        v2.field::<earnproof_shared::DisputeResolverRole>(&deployment.env, "resolver_role"),
+        Some(metadata.resolver_role)
+    );
+
+    let rejected_proof_id = deployment.register_proof(0x28);
+    deployment.proofs.open_dispute(
+        &rejected_proof_id,
+        &deployment.issuer,
+        &hash(&deployment.env, 0x29),
+    );
+    let rejected = deployment.capture(|| {
+        deployment.proofs.reject_dispute(
+            &rejected_proof_id,
+            &DisputeDecisionReason {
+                version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+                code: earnproof_shared::DISPUTE_REASON_CLAIM_UNSUBSTANTIATED,
+                reason_commitment: None,
+            },
+        );
+    });
+    assert_eq!(rejected.len(), 2);
+    for event in &rejected {
+        assert_matches_fixture(&deployment.env, event);
     }
 }
 

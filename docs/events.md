@@ -20,8 +20,9 @@ missing event is eventually noticed while a wrong one is silently committed.
    a failure event, and certainly not a success-shaped one.
 3. **Payload matches committed state.** Every field equals what was written to
    storage in the same invocation.
-4. **Deterministic ordering.** No entry point emits more than one event, so a
-   sequence of N operations yields N events in invocation order.
+4. **Deterministic ordering.** Events are emitted in the order defined by the
+   entry point. Resolve/reject calls emit the legacy event first and the v2
+   audit event second.
 5. **No protected data.** Payloads carry hashes, public addresses, version
    numbers, and timestamps. Never an amount, a memo, an identity, or a secret.
 
@@ -88,6 +89,9 @@ documented `0` sentinel.
 |---|---|---|
 | `proof_registered` | `register_proof` | `proof_id_hash`, `issuer_address`, `schema_version`, `created_ledger`, `created_at`, `expires_at`, `epoch` |
 | `proof_revoked` | `revoke_proof`, `admin_revoke_proof` | `proof_id_hash`, `revoked_at`, `revoked_ledger`, `by_admin`, `epoch` |
+| `dispute_resolved` | `resolve_dispute` | `proof_id_hash`, `resolved_by`, `resolved_by_class`, `resolved_at` (legacy shape) |
+| `dispute_rejected` | `reject_dispute` | `proof_id_hash`, `rejected_by`, `rejected_by_class`, `rejected_at` (legacy shape) |
+| `dispute_decision_committed_v2` | `resolve_dispute`, `reject_dispute` | `proof_id_hash`, `decision_status`, `reason_version`, `reason_code`, `reason_commitment`, `resolver`, `resolver_role`, `ledger`, `timestamp` |
 | `pause_acknowledged` | `acknowledge_pause` | `record` |
 | `pause_acknowledger_changed` | `set_pause_acknowledger` | `address`, `enabled`, `changed_by` |
 
@@ -98,6 +102,17 @@ verifiers understand when a proof became invalid without a follow-up query;
 `by_admin` distinguishes an administrator revocation from an issuer revocation.
 For a legacy record without a recorded revocation sequence,
 `revoked_ledger` is `0` and `revoked_at` remains authoritative.
+
+Resolve and reject emit their original v1-shaped event followed by
+`dispute_decision_committed_v2`. The v2 event commits a stable reason version
+and code, optional 32-byte off-chain rationale commitment, resolver address and
+role, ledger sequence, and timestamp. Reason strings and evidence are never
+accepted or emitted. Withdrawals do not carry a decision reason.
+
+Reason policy version 1 accepts code `1` (evidence supports the claim) for
+resolution. Rejection accepts `2` (claim unsubstantiated), `3` (duplicate),
+`4` (out of scope), or `5` (procedural). Unknown versions and outcome/code
+combinations fail before state changes.
 
 ### Silent entry points
 
@@ -147,9 +162,9 @@ The failure classes covered by tests:
 
 ## Ordering
 
-Ordering is fixed by the ledger, not by the contracts. Because no entry point
-emits more than one event, the guarantee reduces to: **events appear in the order
-their invocations were applied.**
+Ordering is fixed by the ledger and by each entry point: events appear in the
+order their invocations were applied, with the two events from each
+resolve/reject call emitted consecutively.
 
 A multi-step operator sequence therefore reads exactly as issued. For the
 incident-response sequence — pause, suspend, revoke, unpause — an indexer sees:

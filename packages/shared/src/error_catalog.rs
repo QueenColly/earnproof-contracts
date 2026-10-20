@@ -155,7 +155,7 @@ pub struct ErrorSpec {
 }
 
 /// Every published error, ordered by code.
-pub const ERROR_CATALOG: [ErrorSpec; 61] = [
+pub const ERROR_CATALOG: [ErrorSpec; 65] = [
     ErrorSpec {
         code: 1,
         name: "AlreadyInitialized",
@@ -923,6 +923,18 @@ pub const ERROR_CATALOG: [ErrorSpec; 61] = [
         remediation: "Query get_nullifier_domain_versions and submit a nullifier derived under a currently supported version.",
         http_status: 400,
         client_message: "Unsupported nullifier domain version",
+    },
+    ErrorSpec {
+        code: 327,
+        name: "InvalidDisputeReason",
+        enum_name: "ProofError",
+        domain: Domain::ProofRegistry,
+        status: Status::Returned,
+        cause: "resolve_dispute or reject_dispute was given an unsupported reason version or a reason code not allowed for the decision outcome.",
+        retry: Retry::AfterCallerChange,
+        remediation: "Use a supported version-1 reason code for the selected decision outcome.",
+        http_status: 400,
+        client_message: "Invalid dispute decision reason",
     },
 ];
 

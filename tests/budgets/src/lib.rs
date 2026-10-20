@@ -889,7 +889,14 @@ mod tests {
 
         env.cost_estimate().budget().reset_unlimited();
 
-        proof_client.resolve_dispute(&proof_id);
+        proof_client.resolve_dispute(
+            &proof_id,
+            &earnproof_shared::DisputeDecisionReason {
+                version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+                code: earnproof_shared::DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM,
+                reason_commitment: None,
+            },
+        );
 
         assert_budget(
             &env,

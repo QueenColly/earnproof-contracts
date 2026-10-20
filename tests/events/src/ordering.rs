@@ -2,10 +2,9 @@
 //!
 //! ## Ordering
 //!
-//! Every entry point in this workspace publishes at most one event, so ordering
-//! *within* an invocation is trivially deterministic. What an indexer actually
-//! needs to know is the ordering *across* a multi-step operator sequence, and
-//! that it is the ledger — not the contract — which fixes it.
+//! Entry points publish in a documented order. Resolve/reject each emit a
+//! legacy event followed by a v2 metadata event; other tested mutations emit
+//! one. What an indexer needs to know is the ordering across operations too.
 //!
 //! One consequence of the test environment is worth recording, because it
 //! shapes how these tests are written: `env.events().all()` reports the events
@@ -30,14 +29,22 @@ type NamedCall<'a> = (&'a str, std::boxed::Box<dyn Fn() + 'a>);
 // ─── Ordering ───────────────────────────────────────────────────────────────
 
 #[test]
-fn each_mutation_publishes_exactly_one_event() {
-    // The basis of the ordering guarantee: because no entry point emits more
-    // than one event, a sequence of N operations produces exactly N events in
-    // invocation order. An entry point that started emitting two would break
-    // that, so the arity is asserted rather than assumed.
+fn each_mutation_publishes_its_documented_events_in_order() {
     let deployment = Deployment::new();
     let successor = Address::generate(&deployment.env);
     let replacement = Address::generate(&deployment.env);
+    let resolution_id = deployment.register_proof(0xA1);
+    deployment.proofs.open_dispute(
+        &resolution_id,
+        &deployment.issuer,
+        &hash(&deployment.env, 0xA2),
+    );
+    let rejection_id = deployment.register_proof(0xA3);
+    deployment.proofs.open_dispute(
+        &rejection_id,
+        &deployment.issuer,
+        &hash(&deployment.env, 0xA4),
+    );
 
     let sequence: std::vec::Vec<NamedCall> = std::vec![
         ("pause", std::boxed::Box::new(|| deployment.config.pause())),
@@ -90,16 +97,54 @@ fn each_mutation_publishes_exactly_one_event() {
                 deployment.config.accept_admin()
             })
         ),
+        (
+            "resolve_dispute",
+            std::boxed::Box::new(|| {
+                deployment.proofs.resolve_dispute(
+                    &resolution_id,
+                    &earnproof_shared::DisputeDecisionReason {
+                        version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+                        code: earnproof_shared::DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM,
+                        reason_commitment: None,
+                    },
+                )
+            })
+        ),
+        (
+            "reject_dispute",
+            std::boxed::Box::new(|| {
+                deployment.proofs.reject_dispute(
+                    &rejection_id,
+                    &earnproof_shared::DisputeDecisionReason {
+                        version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
+                        code: earnproof_shared::DISPUTE_REASON_CLAIM_UNSUBSTANTIATED,
+                        reason_commitment: None,
+                    },
+                )
+            })
+        ),
     ];
 
     for (name, call) in sequence {
         let events = deployment.capture(&call);
-        assert_eq!(
-            events.len(),
-            1,
-            "{name} must publish exactly one event; a second would change the \
-             ordering guarantee documented in docs/events.md"
-        );
+        if name == "resolve_dispute" || name == "reject_dispute" {
+            assert_eq!(
+                events.len(),
+                2,
+                "{name} must publish its compatibility pair"
+            );
+            assert!(events[1].is(&deployment.env, "dispute_decision_committed_v2"));
+            assert!(events[0].is(
+                &deployment.env,
+                if name == "resolve_dispute" {
+                    "dispute_resolved"
+                } else {
+                    "dispute_rejected"
+                }
+            ));
+        } else {
+            assert_eq!(events.len(), 1, "{name} must publish exactly one event");
+        }
     }
 }
 

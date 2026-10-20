@@ -141,6 +141,7 @@ A Soroban contract error is a type and a number. It carries no message, no paylo
 | 324 | `TooManySuccessors` | `ProofError` | proof-registry | returned | never | 400 |
 | 325 | `DisputeFilingWindowClosed` | `ProofError` | proof-registry | returned | never | 400 |
 | 326 | `UnsupportedNullifierDomain` | `ProofError` | proof-registry | returned | after-operator-action | 400 |
+| 327 | `InvalidDisputeReason` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
 
 ## Details
 ### 1 - `AlreadyInitialized`
@@ -824,5 +825,16 @@ A Soroban contract error is a type and a number. It carries no message, no paylo
 - Remediation: Query `get_nullifier_domain_versions` and submit a nullifier derived under a currently supported version.
 - Suggested HTTP status: 400
 - Client message: "Unsupported nullifier domain version"
+
+### 327 - `InvalidDisputeReason`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: Resolve or reject supplied an unsupported reason version or a reason code not allowed for that outcome.
+- Remediation: Use a supported version-1 reason code for the selected decision outcome.
+- Suggested HTTP status: 400
+- Client message: "Invalid dispute decision reason"
 
 <!-- END GENERATED -->
