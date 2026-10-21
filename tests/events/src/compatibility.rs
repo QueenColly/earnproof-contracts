@@ -109,6 +109,17 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "epoch",
         ],
     ),
+    (
+        "issuer_policy_commitments_changed",
+        &[
+            "issuer_id_hash",
+            "commitments",
+            "version",
+            "effective_ledger",
+            "effective_timestamp",
+            "changed_by",
+        ],
+    ),
     // proof-registry
     (
         "proof_registered",
@@ -119,6 +130,7 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "created_ledger",
             "created_at",
             "expires_at",
+            "configuration_commitments",
             "epoch",
         ],
     ),
@@ -126,14 +138,28 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
         "proof_registered_with_payload",
         &[
             "proof_id_hash",
-            "issuer_address",
-            "schema_version",
-            "created_ledger",
-            "created_at",
-            "expires_at",
             "payload_len",
             "payload_hash",
+            "configuration_commitments",
             "epoch",
+        ],
+    ),
+    (
+        "proof_registered_in_batch",
+        &[
+            "proof_id_hash",
+            "issuer_address",
+            "configuration_commitments",
+        ],
+    ),
+    (
+        "dispute_opened",
+        &[
+            "proof_id_hash",
+            "dispute_sequence",
+            "opened_by",
+            "opened_by_class",
+            "opened_at",
         ],
     ),
     (
@@ -164,6 +190,7 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "resolved_at",
         ],
     ),
+    ("dispute_evidence_committed", &["proof_id_hash", "record"]),
     (
         "dispute_rejected",
         &[
@@ -300,6 +327,19 @@ fn issuer_registry_events_match_their_fixtures() {
             &next,
             &hash(&deployment.env, 0xC4),
             &hash(&deployment.env, 0x99),
+        )
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    for event in deployment.capture(|| {
+        deployment.issuers.set_issuer_policy_commitments(
+            &second_id,
+            &earnproof_shared::IssuerPolicyCommitments {
+                encoding_version: 1,
+                category_commitment: hash(&deployment.env, 0xC6),
+                jurisdiction_commitment: hash(&deployment.env, 0xC7),
+            },
         )
     }) {
         assert_matches_fixture(&deployment.env, &event);

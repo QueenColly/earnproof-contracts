@@ -17,11 +17,11 @@ use super::support::{
     issuer_active_proof_count_key, issuer_epoch_key, issuer_index_count_key, issuer_index_key,
     issuer_key, issuer_lifetime_proof_count_key, issuer_registry_key,
     issuer_revocation_tombstone_key, issuer_ttl_key, max_active_issuers_key, paused_key,
-    proof_context_key, proof_key, proof_policy_key, proof_subject_nullifier_key,
-    proof_subject_pseudonym_key, proof_ttl_key, proof_type_approved_key, protocol_config_key,
-    reactivatable_at_key, reactivation_cooldown_key, registry_epoch_key, schema_predecessor_key,
-    schema_rate_usage_key, schema_version_index_count_key, schema_version_index_key,
-    schema_version_key, successors_key,
+    proof_configuration_key, proof_context_key, proof_key, proof_policy_key,
+    proof_subject_nullifier_key, proof_subject_pseudonym_key, proof_ttl_key,
+    proof_type_approved_key, protocol_config_key, reactivatable_at_key, reactivation_cooldown_key,
+    registry_epoch_key, schema_predecessor_key, schema_rate_usage_key,
+    schema_version_index_count_key, schema_version_index_key, schema_version_key, successors_key,
 };
 use earnproof_shared::{disclosure_consent_commitment, StorageClass};
 use soroban_sdk::testutils::Address as _;
@@ -129,8 +129,10 @@ fn reconstructed_keys_match_the_keys_the_contracts_write() {
         sorted(std::vec![
             encoded(env, proof_key(&deployment.proof_id)),
             encoded(env, proof_ttl_key(env, &deployment.proof_id)),
+            encoded(env, proof_configuration_key(env, &deployment.proof_id)),
             encoded(env, proof_key(&successor_id)),
             encoded(env, proof_ttl_key(env, &successor_id)),
+            encoded(env, proof_configuration_key(env, &successor_id)),
             encoded(env, successors_key(env, &deployment.proof_id)),
             encoded(env, proof_policy_key(env, &deployment.proof_id)),
             encoded(env, proof_policy_key(env, &successor_id)),

@@ -49,7 +49,7 @@ pub const CONTRACTS: [&str; 3] = ["issuer-registry", "proof-registry", "protocol
 /// Adding a row here is the second half of adding a storage key; the first is
 /// adding the `DataKey` variant. Doing one without the other fails the tests in
 /// `tests/storage-keys/`.
-pub const STORAGE_NAMESPACES: [StorageNamespace; 100] = [
+pub const STORAGE_NAMESPACES: [StorageNamespace; 107] = [
     StorageNamespace {
         contract: "issuer-registry",
         namespace: "ActiveIssuerCount",
@@ -189,6 +189,30 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 100] = [
     StorageNamespace {
         contract: "issuer-registry",
         namespace: "IssuerAssuranceSequence",
+        arity: 1,
+        class: StorageClass::Persistent,
+        value: "u32",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
+        namespace: "IssuerPolicy",
+        arity: 1,
+        class: StorageClass::Persistent,
+        value: "IssuerPolicyCommitments",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
+        namespace: "IssuerPolicyHistory",
+        arity: 2,
+        class: StorageClass::Persistent,
+        value: "IssuerPolicyCommitmentRecord",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
+        namespace: "IssuerPolicySequence",
         arity: 1,
         class: StorageClass::Persistent,
         value: "u32",
@@ -393,6 +417,38 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 100] = [
         class: StorageClass::Persistent,
         value: "DisputeDecisionMetadata",
         owner: "authorized resolver",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
+        namespace: "DisputeRound",
+        arity: 1,
+        class: StorageClass::Persistent,
+        value: "u32",
+        owner: "disputing party",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
+        namespace: "DisputeEvidence",
+        arity: 3,
+        class: StorageClass::Persistent,
+        value: "DisputeEvidenceCommitment",
+        owner: "authorized dispute party",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
+        namespace: "DisputeEvidenceCount",
+        arity: 2,
+        class: StorageClass::Persistent,
+        value: "u32",
+        owner: "authorized dispute party",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
+        namespace: "ProofConfiguration",
+        arity: 1,
+        class: StorageClass::Persistent,
+        value: "ProofConfigurationCommitments",
+        owner: "issuing party",
     },
     StorageNamespace {
         contract: "proof-registry",

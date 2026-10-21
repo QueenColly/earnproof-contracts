@@ -191,7 +191,10 @@ fn protocol_config_all_event_fixtures_exist() {
 // Issuer-registry: legacy empty manifest plus versioned lifecycle fixtures
 // ---------------------------------------------------------------------------
 
-const ISSUER_REGISTRY_EVENTS: &[&str] = &["signing-key-lifecycle-changed"];
+const ISSUER_REGISTRY_EVENTS: &[&str] = &[
+    "signing-key-lifecycle-changed",
+    "issuer-policy-commitments-changed",
+];
 
 #[test]
 fn issuer_registry_lifecycle_event_fixtures_are_valid() {
@@ -213,19 +216,25 @@ fn issuer_registry_lifecycle_event_fixtures_are_valid() {
 }
 
 #[test]
-fn issuer_registry_no_events_fixture_exists() {
+fn issuer_registry_events_manifest_exists() {
     let base = fixtures_dir();
     let path = format!("{base}/issuer-registry/v1/events.json");
     assert!(Path::new(&path).exists(), "missing fixture: {path}");
 }
 
 #[test]
-fn issuer_registry_no_events_fixture_valid() {
+fn issuer_registry_events_manifest_valid() {
     let base = fixtures_dir();
     let path = format!("{base}/issuer-registry/v1/events.json");
     let fixture = load_no_events_fixture(&path);
     assert_eq!(fixture.contract, "issuer-registry");
-    assert!(fixture.events.is_empty());
+    assert_eq!(
+        fixture.events,
+        vec![
+            "signing_key_lifecycle_changed",
+            "issuer_policy_commitments_changed"
+        ]
+    );
 }
 
 #[test]
@@ -247,9 +256,13 @@ fn issuer_registry_fixture_matches_contract_version() {
 
 const PROOF_REGISTRY_EVENTS: &[&str] = &[
     "proof-registered",
+    "proof-registered-with-payload",
+    "proof-registered-in-batch",
     "proof-revoked",
     "dispute-resolved",
     "dispute-rejected",
+    "dispute-opened",
+    "dispute-evidence-committed",
 ];
 
 const PROOF_REGISTRY_V2_EVENTS: &[&str] = &["dispute-decision-committed"];

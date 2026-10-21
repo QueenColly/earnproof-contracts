@@ -312,6 +312,25 @@ pub struct ProofPolicySnapshot {
     pub max_validity_seconds: u64,
 }
 
+/// Immutable public configuration references captured when a proof is issued.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProofConfigurationCommitments {
+    pub config_digest_version: u32,
+    pub proof_registry_address: Address,
+    pub proof_registry_digest: BytesN<32>,
+    pub issuer_registry_address: Address,
+    pub issuer_registry_digest: BytesN<32>,
+    pub issuer_policy_version: u32,
+    pub issuer_policy_commitments: IssuerPolicyCommitments,
+    pub protocol_config_address: Address,
+    pub protocol_config_digest: BytesN<32>,
+    pub schema_digest_version: u32,
+    pub schema_config_version: u32,
+    pub schema_version: u32,
+    pub schema_policy_digest: BytesN<32>,
+}
+
 pub fn protocol_config_digest(
     env: &Env,
     admin: &Address,
@@ -493,10 +512,10 @@ impl InterfaceVersion {
 }
 
 /// The interface version implemented by `issuer-registry`.
-pub const ISSUER_REGISTRY_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 1, 0);
+pub const ISSUER_REGISTRY_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 2, 0);
 
 /// The interface version implemented by `protocol-config`.
-pub const PROTOCOL_CONFIG_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 2, 0);
+pub const PROTOCOL_CONFIG_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 3, 0);
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1547,6 +1566,23 @@ pub struct IssuerPolicyCommitments {
     pub jurisdiction_commitment: BytesN<32>,
 }
 
+/// Immutable, privacy-safe issuer policy snapshot. Only opaque commitments
+/// and the effective ledger boundary are retained; policy preimages are never
+/// accepted or stored.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuerPolicyCommitmentRecord {
+    pub commitments: IssuerPolicyCommitments,
+    pub version: u32,
+    pub effective_ledger: u32,
+    pub effective_timestamp: u64,
+}
+
+/// Number of most-recent issuer policy commitment versions retained per issuer.
+pub const ISSUER_POLICY_HISTORY_CAPACITY: u32 = 16;
+/// Maximum issuer policy history entries returned by one query.
+pub const MAX_ISSUER_POLICY_HISTORY_PAGE: u32 = 16;
+
 /// Encoding version for issuer assurance tier commitments.
 pub const ISSUER_ASSURANCE_COMMITMENT_VERSION: u32 = 1;
 /// Assurance tiers are deliberately compact public policy identifiers. Raw
@@ -1803,6 +1839,24 @@ pub struct DisputeRecord {
     pub updated_by_class: DisputeActorClass,
     pub updated_at: u64,
 }
+
+/// Hash-only append-only evidence entry for an open dispute.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeEvidenceCommitment {
+    pub evidence_hash: BytesN<32>,
+    pub dispute_sequence: u32,
+    pub submitter: Address,
+    pub submitter_role: DisputeActorClass,
+    pub algorithm: u32,
+    pub ledger: u32,
+    pub timestamp: u64,
+    pub sequence: u32,
+}
+
+pub const DISPUTE_EVIDENCE_HISTORY_CAPACITY: u32 = 16;
+pub const MAX_DISPUTE_EVIDENCE_HISTORY_PAGE: u32 = 16;
+pub const DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256: u32 = 1;
 
 /// Versioned reason input for a resolve or reject decision. `reason_commitment`
 /// may commit to off-chain rationale, but must never contain evidence or text.

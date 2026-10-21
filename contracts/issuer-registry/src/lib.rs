@@ -2,11 +2,13 @@
 
 use earnproof_shared::{
     ContractError, GenesisRecord, GovernanceRole, GovernanceRoleAssignment, InterfaceVersion,
-    IssuerAssuranceLevelCommitment, IssuerError, IssuerPolicyCommitments, IssuerQueryStatus,
+    IssuerAssuranceLevelCommitment, IssuerError, IssuerPolicyCommitmentRecord,
+    IssuerPolicyCommitments, IssuerQueryStatus,
     IssuerRecord, IssuerStatus, IssuerStatusResult, MigrationStatus, RotationRecord,
     SigningKeyCommitment, SigningKeyLifecycleRecord, SigningKeyLifecycleTransition, TtlStatus,
     UpgradeApproval, UpgradeReceipt, ISSUER_ASSURANCE_COMMITMENT_VERSION,
     ISSUER_ASSURANCE_HISTORY_CAPACITY, ISSUER_REGISTRY_INTERFACE_VERSION,
+    ISSUER_POLICY_HISTORY_CAPACITY, MAX_ISSUER_POLICY_HISTORY_PAGE,
     MAX_ISSUER_ASSURANCE_HISTORY_PAGE, MAX_ISSUER_ASSURANCE_LEVEL, MAX_ISSUER_STATUS_BATCH,
     MAX_MIGRATION_BATCH, MAX_SIGNING_KEY_LIFECYCLE_PAGE, METADATA_REVISION_INITIAL,
     MIGRATION_STATUS_VERSION, SIGNING_KEY_LIFECYCLE_HISTORY_CAPACITY, TTL_EXTEND_TO_LEDGERS,
@@ -72,6 +74,8 @@ enum DataKey {
     RotationCount(BytesN<32>),
     ExecutedProposal(BytesN<32>),
     IssuerPolicy(BytesN<32>),
+    IssuerPolicyHistory(BytesN<32>, u32),
+    IssuerPolicySequence(BytesN<32>),
     IssuerAssurance(BytesN<32>),
     IssuerAssuranceHistory(BytesN<32>, u32),
     IssuerAssuranceSequence(BytesN<32>),
@@ -295,6 +299,17 @@ pub struct IssuerAssuranceLevelChanged {
     pub sequence: u32,
     pub changed_by: Address,
     pub epoch: u64,
+}
+
+/// Emitted after a privacy-safe issuer policy commitment version is recorded.
+#[contractevent]
+pub struct IssuerPolicyCommitmentsChanged {
+    pub issuer_id_hash: BytesN<32>,
+    pub commitments: IssuerPolicyCommitments,
+    pub version: u32,
+    pub effective_ledger: u32,
+    pub effective_timestamp: u64,
+    pub changed_by: Address,
 }
 
 #[contractevent]
@@ -1537,9 +1552,42 @@ impl IssuerRegistryContract {
             return Err(IssuerError::InvalidMetadataCommitment);
         }
         Self::get_issuer(env.clone(), issuer_id.clone())?;
+        let sequence_key = DataKey::IssuerPolicySequence(issuer_id.clone());
+        let version = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&sequence_key)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
+        let record = IssuerPolicyCommitmentRecord {
+            commitments: commitments.clone(),
+            version,
+            effective_ledger: env.ledger().sequence(),
+            effective_timestamp: env.ledger().timestamp(),
+        };
+        let current_key = DataKey::IssuerPolicy(issuer_id.clone());
+        let history_key = DataKey::IssuerPolicyHistory(
+            issuer_id.clone(),
+            (version - 1) % ISSUER_POLICY_HISTORY_CAPACITY,
+        );
         env.storage()
             .persistent()
-            .set(&DataKey::IssuerPolicy(issuer_id), &commitments);
+            .set(&current_key, &commitments);
+        env.storage().persistent().set(&history_key, &record);
+        env.storage().persistent().set(&sequence_key, &version);
+        Self::extend_issuer_key_ttl(env.clone(), &current_key);
+        Self::extend_issuer_key_ttl(env.clone(), &history_key);
+        Self::extend_issuer_key_ttl(env.clone(), &sequence_key);
+        IssuerPolicyCommitmentsChanged {
+            issuer_id_hash: issuer_id,
+            commitments,
+            version,
+            effective_ledger: record.effective_ledger,
+            effective_timestamp: record.effective_timestamp,
+            changed_by: admin,
+        }
+        .publish(&env);
         Ok(())
     }
     pub fn get_issuer_policy_commitments(
@@ -1549,6 +1597,67 @@ impl IssuerRegistryContract {
         env.storage()
             .persistent()
             .get(&DataKey::IssuerPolicy(issuer_id))
+    }
+
+    pub fn get_issuer_policy_version(env: Env, issuer_id: BytesN<32>) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuerPolicySequence(issuer_id))
+            .unwrap_or(0)
+    }
+
+    pub fn get_issuer_policy_commitment_at_version(
+        env: Env,
+        issuer_id: BytesN<32>,
+        version: u32,
+    ) -> Option<IssuerPolicyCommitmentRecord> {
+        if version == 0 {
+            return None;
+        }
+        let key = DataKey::IssuerPolicyHistory(
+            issuer_id,
+            (version - 1) % ISSUER_POLICY_HISTORY_CAPACITY,
+        );
+        match env
+            .storage()
+            .persistent()
+            .get::<_, IssuerPolicyCommitmentRecord>(&key)
+        {
+            Some(record) if record.version == version => {
+                Self::extend_issuer_key_ttl(env, &key);
+                Some(record)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_issuer_policy_history(
+        env: Env,
+        issuer_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<IssuerPolicyCommitmentRecord>, IssuerError> {
+        if limit > MAX_ISSUER_POLICY_HISTORY_PAGE {
+            return Err(IssuerError::BatchTooLarge);
+        }
+        let latest = Self::get_issuer_policy_version(env.clone(), issuer_id.clone());
+        let first = latest
+            .saturating_sub(ISSUER_POLICY_HISTORY_CAPACITY)
+            .saturating_add(1);
+        let mut version = first.saturating_add(offset);
+        let mut records = Vec::new(&env);
+        while version <= latest && records.len() < limit {
+            if let Some(record) =
+                Self::get_issuer_policy_commitment_at_version(env.clone(), issuer_id.clone(), version)
+            {
+                records.push_back(record);
+            }
+            if version == latest {
+                break;
+            }
+            version += 1;
+        }
+        Ok(records)
     }
 
     /// Commits a compact public assurance tier for an issuer.
@@ -2090,6 +2199,12 @@ impl IssuerRegistryContract {
             Some(id) => Self::is_active_issuer(env, id),
             None => false,
         }
+    }
+
+    pub fn get_issuer_id_hash(env: Env, issuer_address: Address) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AddressIssuer(issuer_address))
     }
 
     // ── epoch, capacity, cooldown, interface version ──────────────────────────
@@ -3006,13 +3121,15 @@ mod test {
 
     use super::{DataKey, IssuerRegistryContract, IssuerRegistryContractClient};
     use earnproof_shared::{
-        ContractError, GovernanceRole, GovernanceRoleState, IssuerError, IssuerQueryStatus,
+        ContractError, GovernanceRole, GovernanceRoleState, IssuerError, IssuerPolicyCommitments,
+        IssuerQueryStatus,
         IssuerStatus, IssuerStatusResult, MAX_ISSUER_STATUS_BATCH, TTL_THRESHOLD_LEDGERS,
         AdminTransferState, ContractError, IssuerError, IssuerQueryStatus, IssuerStatus,
         IssuerStatusResult, ADMIN_TRANSFER_EXPIRY_LEDGERS, MAX_ISSUER_STATUS_BATCH,
         ContractError, IssuerError, IssuerQueryStatus, IssuerRevocationState, IssuerStatus,
         IssuerStatusResult, ISSUER_REVOCATION_TOMBSTONE_VERSION, MAX_ISSUER_STATUS_BATCH,
         TTL_THRESHOLD_LEDGERS,
+        ISSUER_POLICY_HISTORY_CAPACITY,
     };
     use soroban_sdk::{
         testutils::{
@@ -3037,6 +3154,139 @@ mod test {
         let admin = Address::from_str(&env, ADMIN);
         client.initialize(&admin);
         (env, client, admin)
+    }
+
+    fn policy_commitments(env: &Env, seed: u8) -> IssuerPolicyCommitments {
+        IssuerPolicyCommitments {
+            encoding_version: 1,
+            category_commitment: bytes(env, seed),
+            jurisdiction_commitment: bytes(env, seed.wrapping_add(1)),
+        }
+    }
+
+    #[test]
+    fn issuer_policy_updates_rotate_and_evict_bounded_history() {
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 7);
+        let issuer_address = Address::from_str(&env, ISSUER_ONE);
+        client.register_issuer(&issuer_id, &issuer_address, &bytes(&env, 2), &bytes(&env, 3));
+
+        for version in 1..=ISSUER_POLICY_HISTORY_CAPACITY + 1 {
+            env.ledger().set_sequence_number(100 + version);
+            env.ledger().set_timestamp(1_000 + u64::from(version));
+            client.set_issuer_policy_commitments(&issuer_id, &policy_commitments(&env, version as u8));
+            assert_eq!(client.get_issuer_policy_version(&issuer_id), version);
+        }
+
+        assert_eq!(client.get_issuer_policy_commitment_at_version(&issuer_id, &1), None);
+        let latest = client
+            .get_issuer_policy_commitment_at_version(&issuer_id, &(ISSUER_POLICY_HISTORY_CAPACITY + 1))
+            .expect("latest policy version is retained");
+        assert_eq!(latest.version, ISSUER_POLICY_HISTORY_CAPACITY + 1);
+        assert_eq!(latest.effective_ledger, 101 + ISSUER_POLICY_HISTORY_CAPACITY);
+        assert_eq!(latest.effective_timestamp, 1_001 + u64::from(ISSUER_POLICY_HISTORY_CAPACITY));
+        assert_eq!(latest.commitments, client.get_issuer_policy_commitments(&issuer_id).unwrap());
+        assert_eq!(client.get_issuer_policy_history(&issuer_id, &0, &16).len(), 16);
+    }
+
+    #[test]
+    fn failed_issuer_policy_updates_do_not_advance_version_or_history() {
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 8);
+        let issuer_address = Address::from_str(&env, ISSUER_ONE);
+        client.register_issuer(&issuer_id, &issuer_address, &bytes(&env, 2), &bytes(&env, 3));
+        client.set_issuer_policy_commitments(&issuer_id, &policy_commitments(&env, 4));
+
+        let result = client.try_set_issuer_policy_commitments(
+            &issuer_id,
+            &IssuerPolicyCommitments {
+                encoding_version: 2,
+                category_commitment: bytes(&env, 5),
+                jurisdiction_commitment: bytes(&env, 6),
+            },
+        );
+        assert_eq!(result, Err(Ok(IssuerError::InvalidMetadataCommitment)));
+        assert_eq!(client.get_issuer_policy_version(&issuer_id), 1);
+        assert_eq!(client.get_issuer_policy_history(&issuer_id, &0, &16).len(), 1);
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(
+                &DataKey::IssuerPolicySequence(issuer_id.clone()),
+                &u32::MAX,
+            );
+        });
+        assert_eq!(
+            client.try_set_issuer_policy_commitments(&issuer_id, &policy_commitments(&env, 7)),
+            Err(Ok(IssuerError::SequenceOverflow))
+        );
+        assert_eq!(client.get_issuer_policy_version(&issuer_id), u32::MAX);
+    }
+
+    #[test]
+    fn legacy_issuer_policy_remains_readable_and_first_update_starts_version_one() {
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 9);
+        let issuer_address = Address::from_str(&env, ISSUER_ONE);
+        client.register_issuer(&issuer_id, &issuer_address, &bytes(&env, 2), &bytes(&env, 3));
+        let legacy = policy_commitments(&env, 0x31);
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::IssuerPolicy(issuer_id.clone()), &legacy);
+        });
+
+        assert_eq!(client.get_issuer_policy_commitments(&issuer_id), Some(legacy.clone()));
+        assert_eq!(client.get_issuer_policy_version(&issuer_id), 0);
+        client.set_issuer_policy_commitments(&issuer_id, &policy_commitments(&env, 0x32));
+        assert_eq!(client.get_issuer_policy_version(&issuer_id), 1);
+        assert_eq!(client.get_issuer_policy_commitments(&issuer_id), Some(policy_commitments(&env, 0x32)));
+    }
+
+    #[test]
+    fn issuer_policy_update_requires_admin_authorization() {
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 11);
+        let issuer_address = Address::from_str(&env, ISSUER_ONE);
+        client.register_issuer(&issuer_id, &issuer_address, &bytes(&env, 2), &bytes(&env, 3));
+        let other = Address::from_str(&env, ISSUER_TWO);
+        env.set_auths(&[]);
+        let auth_entry = MockAuth {
+            address: &other,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "set_issuer_policy_commitments",
+                args: (issuer_id.clone(), policy_commitments(&env, 0x61)).into_val(&env),
+                sub_invokes: &[],
+            },
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client
+                .mock_auths(&[auth_entry])
+                .set_issuer_policy_commitments(&issuer_id, &policy_commitments(&env, 0x61));
+        }));
+        assert!(result.is_err());
+        assert_eq!(client.get_issuer_policy_version(&issuer_id), 0);
+        assert_eq!(client.get_issuer_policy_history(&issuer_id, &0, &16).len(), 0);
+    }
+
+    #[test]
+    fn issuer_policy_update_emits_version_and_effective_time() {
+        use soroban_sdk::testutils::Events as _;
+
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 10);
+        let issuer_address = Address::from_str(&env, ISSUER_ONE);
+        client.register_issuer(&issuer_id, &issuer_address, &bytes(&env, 2), &bytes(&env, 3));
+        env.ledger().set_sequence_number(7_777);
+        env.ledger().set_timestamp(88_888);
+        client.set_issuer_policy_commitments(&issuer_id, &policy_commitments(&env, 0x41));
+
+        assert_eq!(env.events().all().events().len(), 1);
+        let record = client
+            .get_issuer_policy_commitment_at_version(&issuer_id, &1)
+            .expect("emitted version is queryable");
+        assert_eq!(record.effective_ledger, 7_777);
+        assert_eq!(record.effective_timestamp, 88_888);
     }
 
     // ── existing tests ────────────────────────────────────────────────────────

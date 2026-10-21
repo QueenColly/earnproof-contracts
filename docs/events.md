@@ -62,6 +62,7 @@ lineage link and `schema_approved` for the approval itself. A predecessor-less
 | `issuer_revoked` | `revoke_issuer` | `issuer_id_hash`, `effective_ledger`, `effective_timestamp`, `updated_at` |
 | `issuer_address_rotated` | `rotate_issuer_address` | `issuer_id_hash`, `old_address`, `new_address`, `updated_at` |
 | `issuer_signing_key_compromised` | `mark_signing_key_compromised` | `record`, `marked_by` |
+| `issuer_policy_commitments_changed` | `set_issuer_policy_commitments` | `issuer_id_hash`, `commitments`, `version`, `effective_ledger`, `effective_timestamp`, `changed_by` |
 | `governance_role_delay_changed` | `set_role_activation_delay` | `role`, `previous_delay_ledgers`, `new_delay_ledgers`, `changed_by` |
 
 `issuer_address_rotated` carries both addresses so an indexer can update its
@@ -87,7 +88,10 @@ documented `0` sentinel.
 
 | Topic | Emitted by | Payload |
 |---|---|---|
-| `proof_registered` | `register_proof` | `proof_id_hash`, `issuer_address`, `schema_version`, `created_ledger`, `created_at`, `expires_at`, `epoch` |
+| `proof_registered` | `register_proof` | `proof_id_hash`, `issuer_address`, `schema_version`, `created_ledger`, `created_at`, `expires_at`, `configuration_commitments`, `epoch` |
+| `proof_registered_with_payload` | `register_proof_with_payload` | `proof_id_hash`, `payload_len`, `payload_hash`, `configuration_commitments`, `epoch` |
+| `proof_registered_in_batch` | `register_proofs_batch` | `proof_id_hash`, `issuer_address`, `configuration_commitments` |
+| `dispute_evidence_committed` | `append_dispute_evidence` | `proof_id_hash`, `record` |
 | `proof_revoked` | `revoke_proof`, `admin_revoke_proof` | `proof_id_hash`, `revoked_at`, `revoked_ledger`, `by_admin`, `epoch` |
 | `dispute_resolved` | `resolve_dispute` | `proof_id_hash`, `resolved_by`, `resolved_by_class`, `resolved_at` (legacy shape) |
 | `dispute_rejected` | `reject_dispute` | `proof_id_hash`, `rejected_by`, `rejected_by_class`, `rejected_at` (legacy shape) |
@@ -96,7 +100,10 @@ documented `0` sentinel.
 | `pause_acknowledger_changed` | `set_pause_acknowledger` | `address`, `enabled`, `changed_by` |
 
 `proof_registered` carries the on-chain creation timing, sourced from the
-ledger, and the registry epoch after the mutation. `proof_revoked` carries both
+ledger, the immutable issuer/protocol/registry configuration digests and
+version references, and the registry epoch after the mutation. Its
+`configuration_commitments` field contains hashes, version numbers, and
+contract identities only; no policy preimages or private claims. `proof_revoked` carries both
 revocation timing values and the epoch after revocation. The timing lets
 verifiers understand when a proof became invalid without a follow-up query;
 `by_admin` distinguishes an administrator revocation from an issuer revocation.
@@ -113,6 +120,21 @@ Reason policy version 1 accepts code `1` (evidence supports the claim) for
 resolution. Rejection accepts `2` (claim unsubstantiated), `3` (duplicate),
 `4` (out of scope), or `5` (procedural). Unknown versions and outcome/code
 combinations fail before state changes.
+
+`issuer_policy_commitments_changed` announces a monotonic per-issuer policy
+version and its ledger/timestamp effective boundary. Only the opaque category
+and jurisdiction commitment hashes are published. `set_issuer_policy_commitments`
+retains the latest 16 summaries; `get_issuer_policy_version`,
+`get_issuer_policy_commitment_at_version`, and `get_issuer_policy_history`
+expose current and retained versions. Existing current-policy storage remains
+decodable; legacy issuers without a version counter report version `0` until
+their first successful update.
+
+`append_dispute_evidence` accepts only a 32-byte hash and algorithm identifier.
+It records submitter role, per-dispute sequence, ledger, and timestamp. Evidence
+is append-only and limited to 16 entries per dispute round; evidence text,
+URLs, and claims are never accepted. `get_dispute_sequence` identifies the
+round for `get_dispute_evidence_history`, whose cursor is zero-based.
 
 ### Silent entry points
 

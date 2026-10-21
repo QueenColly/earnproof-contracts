@@ -6,17 +6,21 @@
 #[allow(unused_imports)]
 use earnproof_shared::{
     is_interface_compatible, ApprovalQuery, ApprovalStatus, ArchivedProofRecord, ContractError,
-    DisputeActorClass, DisputeDecisionMetadata, DisputeDecisionReason, DisputeFilingAnchor,
-    DisputeFilingEligibility, DisputeFilingPolicy, DisputeFilingStatus, DisputeRecord,
-    DisputeResolverRole, DisputeStatus, GenesisRecord, InterfaceVersion, MigrationStatus,
-    PauseScope, ProofError, ProofPayloadRecord, ProofRecord, ProofRegistrationInput, ProofStatus,
-    ProofValidity, ProofValidityDetails, SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier,
-    TtlStatus, UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord,
-    UpgradeHistoryRecord, UpgradeReceipt, DISPUTE_DECISION_REASON_VERSION,
-    DISPUTE_REASON_CLAIM_UNSUBSTANTIATED, DISPUTE_REASON_DUPLICATE,
-    DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM, DISPUTE_REASON_OUT_OF_SCOPE, DISPUTE_REASON_PROCEDURAL,
-    MAX_MIGRATION_BATCH, MAX_PROOF_BATCH_SIZE, MIGRATION_STATUS_VERSION, TTL_EXTEND_TO_LEDGERS,
-    TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS, UPGRADE_TIMELOCK_LEDGERS,
+    DisputeActorClass, DisputeDecisionMetadata, DisputeDecisionReason, DisputeEvidenceCommitment,
+    DisputeFilingAnchor, DisputeFilingEligibility, DisputeFilingPolicy, DisputeFilingStatus,
+    DisputeRecord, DisputeResolverRole, DisputeStatus, GenesisRecord, InterfaceVersion,
+    IssuerPolicyCommitmentRecord, IssuerPolicyCommitments, MigrationStatus, PauseScope,
+    ProofConfigurationCommitments, ProofError, ProofPayloadRecord, ProofRecord,
+    ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails, SchemaPolicyDigest,
+    SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier, TtlStatus, UpgradeApproval,
+    UpgradeApprovalMetadata, UpgradeApprovalRecord, UpgradeHistoryRecord, UpgradeReceipt,
+    DISPUTE_DECISION_REASON_VERSION, DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+    DISPUTE_EVIDENCE_HISTORY_CAPACITY, DISPUTE_REASON_CLAIM_UNSUBSTANTIATED,
+    DISPUTE_REASON_DUPLICATE, DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM, DISPUTE_REASON_OUT_OF_SCOPE,
+    DISPUTE_REASON_PROCEDURAL, MAX_DISPUTE_EVIDENCE_HISTORY_PAGE, MAX_MIGRATION_BATCH,
+    MAX_PROOF_BATCH_SIZE, MIGRATION_STATUS_VERSION, SCHEMA_POLICY_DIGEST_VERSION,
+    TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS,
+    UPGRADE_TIMELOCK_LEDGERS,
 };
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
@@ -25,10 +29,10 @@ use soroban_sdk::{
 
 /// Minimum `issuer-registry` interface version this contract can bind to.
 /// A dependency must report the same major and at least this minor/patch.
-const REQUIRED_ISSUER_REGISTRY_VERSION: InterfaceVersion = InterfaceVersion::new(1, 0, 0);
+const REQUIRED_ISSUER_REGISTRY_VERSION: InterfaceVersion = InterfaceVersion::new(1, 2, 0);
 
 /// Minimum `protocol-config` interface version this contract can bind to.
-const REQUIRED_PROTOCOL_CONFIG_VERSION: InterfaceVersion = InterfaceVersion::new(1, 0, 0);
+const REQUIRED_PROTOCOL_CONFIG_VERSION: InterfaceVersion = InterfaceVersion::new(1, 3, 0);
 
 #[contractclient(name = "ProtocolConfigContractClient")]
 pub trait ProtocolConfigInterface {
@@ -39,6 +43,12 @@ pub trait ProtocolConfigInterface {
     fn get_schema_payload_limit(env: Env, version: u32) -> u32;
     fn get_schema_rate_limit(env: Env, version: u32) -> SchemaRateLimit;
     fn get_dispute_filing_policy(env: Env) -> DisputeFilingPolicy;
+    fn get_config_digest(env: Env) -> Result<BytesN<32>, ContractError>;
+    fn get_config_digest_version() -> u32;
+    fn get_schema_policy_digest(
+        env: Env,
+        version: u32,
+    ) -> Result<SchemaPolicyDigest, ContractError>;
     fn is_nullifier_domain_supported(env: Env, domain_version: u32) -> bool;
     fn interface_version(env: Env) -> InterfaceVersion;
 }
@@ -46,6 +56,15 @@ pub trait ProtocolConfigInterface {
 #[contractclient(name = "IssuerRegistryContractClient")]
 pub trait IssuerRegistryInterface {
     fn is_active_address(env: Env, issuer_address: Address) -> bool;
+    fn get_config_digest(env: Env) -> Result<BytesN<32>, ContractError>;
+    fn get_config_digest_version() -> u32;
+    fn get_issuer_policy_version(env: Env, issuer_id: BytesN<32>) -> u32;
+    fn get_issuer_policy_commitment_at_version(
+        env: Env,
+        issuer_id: BytesN<32>,
+        version: u32,
+    ) -> Option<IssuerPolicyCommitmentRecord>;
+    fn get_issuer_id_hash(env: Env, issuer_address: Address) -> Option<BytesN<32>>;
     fn interface_version(env: Env) -> InterfaceVersion;
 }
 
@@ -70,8 +89,12 @@ enum DataKey {
     IssuerRegistry,
     ProtocolConfig,
     Proof(BytesN<32>),
+    ProofConfiguration(BytesN<32>),
     /// Dispute state for a proof (issue: dispute lifecycle).
     Dispute(BytesN<32>),
+    DisputeRound(BytesN<32>),
+    DisputeEvidence(BytesN<32>, u32, u32),
+    DisputeEvidenceCount(BytesN<32>, u32),
     /// Tracked TTL expiration ledger for a specific proof record.
     ProofTtl(BytesN<32>),
     /// Tracked TTL expiration ledger for the contract instance entry.
@@ -229,6 +252,7 @@ pub struct ContractDecommissioned {
 pub struct ProofRegisteredInBatch {
     pub proof_id_hash: BytesN<32>,
     pub issuer_address: Address,
+    pub configuration_commitments: ProofConfigurationCommitments,
 }
 
 /// Emitted once per proof successfully revoked via `revoke_proofs_batch` or
@@ -247,9 +271,17 @@ pub struct ProofRevokedInBatch {
 #[contractevent]
 pub struct DisputeOpened {
     pub proof_id_hash: BytesN<32>,
+    pub dispute_sequence: u32,
     pub opened_by: Address,
     pub opened_by_class: DisputeActorClass,
     pub opened_at: u64,
+}
+
+/// Emitted for each hash-only evidence commitment appended to an open dispute.
+#[contractevent]
+pub struct DisputeEvidenceCommitted {
+    pub proof_id_hash: BytesN<32>,
+    pub record: DisputeEvidenceCommitment,
 }
 
 /// Emitted when the disputant withdraws their own open dispute.
@@ -310,6 +342,7 @@ pub struct ProofRegistered {
     pub created_ledger: u32,
     pub created_at: u64,
     pub expires_at: u64,
+    pub configuration_commitments: ProofConfigurationCommitments,
     pub epoch: u32,
 }
 
@@ -319,6 +352,7 @@ pub struct ProofRegisteredWithPayload {
     pub proof_id_hash: BytesN<32>,
     pub payload_len: u32,
     pub payload_hash: BytesN<32>,
+    pub configuration_commitments: ProofConfigurationCommitments,
     pub epoch: u32,
 }
 
@@ -827,15 +861,22 @@ impl ProofRegistryContract {
         };
 
         env.storage().persistent().set(&key, &record);
+        let configuration_commitments = Self::commit_proof_configuration(
+            &env,
+            &proof_id_hash,
+            &issuer_address,
+            schema_version,
+        )?;
         Self::extend_proof_key_ttl(env.clone(), &key);
         let epoch = Self::bump_registry_epoch(&env);
         ProofRegistered {
             proof_id_hash,
-            issuer_address,
+            issuer_address: issuer_address.clone(),
             schema_version,
             created_ledger,
             created_at: now,
             expires_at,
+            configuration_commitments,
             epoch,
         }
         .publish(&env);
@@ -979,7 +1020,7 @@ impl ProofRegistryContract {
             proof_id_hash: proof_id_hash.clone(),
             commitment_hash,
             disclosure_policy_hash: BytesN::from_array(&env, &[0; 32]),
-            issuer_address,
+            issuer_address: issuer_address.clone(),
             status: ProofStatus::Active,
             schema_version,
             expires_at,
@@ -993,6 +1034,12 @@ impl ProofRegistryContract {
             activates_at: 0,
         };
         env.storage().persistent().set(&key, &record);
+        let configuration_commitments = Self::commit_proof_configuration(
+            &env,
+            &proof_id_hash,
+            &issuer_address,
+            schema_version,
+        )?;
         Self::extend_proof_key_ttl(env.clone(), &key);
 
         let payload_hash = env.crypto().sha256(&payload).to_bytes();
@@ -1009,6 +1056,7 @@ impl ProofRegistryContract {
             proof_id_hash,
             payload_len,
             payload_hash,
+            configuration_commitments,
             epoch,
         }
         .publish(&env);
@@ -1143,10 +1191,10 @@ impl ProofRegistryContract {
         let sequence_number = Self::next_issuer_proof_sequence(&env, &issuer_address)?;
         Self::consume_issuer_proof_capacity(&env, &issuer_address)?;
         let record = ProofRecord {
-            proof_id_hash,
+            proof_id_hash: proof_id_hash.clone(),
             commitment_hash,
             disclosure_policy_hash: BytesN::from_array(&env, &[0; 32]),
-            issuer_address,
+            issuer_address: issuer_address.clone(),
             status: ProofStatus::Active,
             schema_version,
             expires_at,
@@ -1161,6 +1209,7 @@ impl ProofRegistryContract {
         };
 
         env.storage().persistent().set(&key, &record);
+        Self::commit_proof_configuration(&env, &proof_id_hash, &issuer_address, schema_version)?;
         Self::extend_proof_key_ttl(env, &key);
         Ok(())
     }
@@ -1270,6 +1319,12 @@ impl ProofRegistryContract {
             };
 
             env.storage().persistent().set(&key, &record);
+            let configuration_commitments = Self::commit_proof_configuration(
+                &env,
+                &entry.proof_id_hash,
+                &issuer_address,
+                entry.schema_version,
+            )?;
             // A plain TTL bump, deliberately skipping the per-key TTL
             // tracker write `extend_proof_key_ttl` also performs: a batch of
             // up to `MAX_PROOF_BATCH_SIZE` entries must stay within the
@@ -1284,6 +1339,7 @@ impl ProofRegistryContract {
             ProofRegisteredInBatch {
                 proof_id_hash: entry.proof_id_hash.clone(),
                 issuer_address: issuer_address.clone(),
+                configuration_commitments,
             }
             .publish(&env);
         }
@@ -1417,6 +1473,25 @@ impl ProofRegistryContract {
             .get(&key)
             .ok_or(ProofError::ProofNotFound)?;
         Self::extend_proof_key_ttl(env, &key);
+        Ok(record)
+    }
+
+    /// Returns the immutable public configuration commitments captured at
+    /// proof registration. Legacy records return `None`.
+    pub fn get_proof_configuration_commitments(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+    ) -> Result<Option<ProofConfigurationCommitments>, ProofError> {
+        let proof_key = DataKey::Proof(proof_id_hash.clone());
+        if !env.storage().persistent().has(&proof_key) {
+            return Err(ProofError::ProofNotFound);
+        }
+        Self::extend_proof_key_ttl(env.clone(), &proof_key);
+        let key = DataKey::ProofConfiguration(proof_id_hash);
+        let record = env.storage().persistent().get(&key);
+        if record.is_some() {
+            Self::extend_proof_key_ttl(env, &key);
+        }
         Ok(record)
     }
 
@@ -1588,6 +1663,14 @@ impl ProofRegistryContract {
 
         let actor_class = Self::classify_actor(&env, &disputant, &proof.issuer_address);
         let now = env.ledger().timestamp();
+        let round_key = DataKey::DisputeRound(proof_id_hash.clone());
+        let dispute_sequence = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&round_key)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(ProofError::ProofCountOverflow)?;
         let record = DisputeRecord {
             proof_id_hash: proof_id_hash.clone(),
             evidence_commitment,
@@ -1604,11 +1687,16 @@ impl ProofRegistryContract {
         env.storage().persistent().set(&dispute_key, &record);
         env.storage()
             .persistent()
+            .set(&round_key, &dispute_sequence);
+        env.storage()
+            .persistent()
             .remove(&DataKey::DisputeDecisionMetadata(proof_id_hash.clone()));
         Self::extend_proof_key_ttl(env.clone(), &dispute_key);
+        Self::extend_proof_key_ttl(env.clone(), &round_key);
 
         DisputeOpened {
             proof_id_hash,
+            dispute_sequence,
             opened_by: disputant,
             opened_by_class: actor_class,
             opened_at: now,
@@ -1669,6 +1757,149 @@ impl ProofRegistryContract {
             .ok_or(ProofError::DisputeNotFound)?;
         Self::extend_proof_key_ttl(env, &key);
         Ok(record)
+    }
+
+    /// Appends an opaque evidence hash to an open dispute. The interface
+    /// accepts only a fixed-size commitment, never evidence, URLs, or claims.
+    pub fn append_dispute_evidence(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+        submitter: Address,
+        algorithm: u32,
+        evidence_hash: BytesN<32>,
+    ) -> Result<DisputeEvidenceCommitment, ProofError> {
+        Self::ensure_not_decommissioned(&env)?;
+        if Self::is_scope_paused(&env, PauseScope::Disputes) {
+            return Err(ProofError::ContractPaused);
+        }
+        if algorithm != DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256
+            || evidence_hash == BytesN::from_array(&env, &[0; 32])
+        {
+            return Err(ProofError::MalformedInput);
+        }
+        let dispute_key = DataKey::Dispute(proof_id_hash.clone());
+        let dispute: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(ProofError::DisputeNotFound)?;
+        if dispute.status != DisputeStatus::Open {
+            return Err(ProofError::DisputeNotOpen);
+        }
+        let proof: ProofRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proof(proof_id_hash.clone()))
+            .ok_or(ProofError::ProofNotFound)?;
+        let admin = Self::get_admin(env.clone()).ok();
+        if submitter != dispute.opened_by
+            && submitter != proof.issuer_address
+            && admin.as_ref() != Some(&submitter)
+        {
+            return Err(ProofError::InvalidAddress);
+        }
+        Self::require_auth(&submitter);
+
+        let dispute_sequence: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeRound(proof_id_hash.clone()))
+            .unwrap_or(0);
+        let count_key = DataKey::DisputeEvidenceCount(proof_id_hash.clone(), dispute_sequence);
+        let sequence: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        if sequence >= DISPUTE_EVIDENCE_HISTORY_CAPACITY {
+            return Err(ProofError::ProofCapacityReached);
+        }
+        if evidence_hash == dispute.evidence_commitment {
+            return Err(ProofError::MalformedInput);
+        }
+        for index in 0..sequence {
+            if env
+                .storage()
+                .persistent()
+                .get::<_, DisputeEvidenceCommitment>(&DataKey::DisputeEvidence(
+                    proof_id_hash.clone(),
+                    dispute_sequence,
+                    index,
+                ))
+                .is_some_and(|record| record.evidence_hash == evidence_hash)
+            {
+                return Err(ProofError::MalformedInput);
+            }
+        }
+        let record = DisputeEvidenceCommitment {
+            evidence_hash,
+            dispute_sequence,
+            submitter_role: Self::classify_actor(&env, &submitter, &proof.issuer_address),
+            submitter,
+            algorithm,
+            ledger: env.ledger().sequence(),
+            timestamp: env.ledger().timestamp(),
+            sequence: sequence + 1,
+        };
+        let history_key =
+            DataKey::DisputeEvidence(proof_id_hash.clone(), dispute_sequence, sequence);
+        env.storage().persistent().set(&history_key, &record);
+        env.storage().persistent().set(&count_key, &(sequence + 1));
+        Self::extend_proof_key_ttl(env.clone(), &history_key);
+        Self::extend_proof_key_ttl(env.clone(), &count_key);
+        DisputeEvidenceCommitted {
+            proof_id_hash,
+            record: record.clone(),
+        }
+        .publish(&env);
+        Ok(record)
+    }
+
+    /// Returns append order by zero-based cursor, bounded to one page.
+    pub fn get_dispute_evidence_history(
+        env: Env,
+        proof_id_hash: BytesN<32>,
+        dispute_sequence: u32,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<Vec<DisputeEvidenceCommitment>, ProofError> {
+        if limit == 0 || limit > MAX_DISPUTE_EVIDENCE_HISTORY_PAGE {
+            return Err(ProofError::InvalidBatchSize);
+        }
+        let dispute_key = DataKey::Dispute(proof_id_hash.clone());
+        if !env.storage().persistent().has(&dispute_key) {
+            return Err(ProofError::DisputeNotFound);
+        }
+        Self::extend_proof_key_ttl(env.clone(), &dispute_key);
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidenceCount(
+                proof_id_hash.clone(),
+                dispute_sequence,
+            ))
+            .unwrap_or(0);
+        let end = cursor.saturating_add(limit).min(count);
+        let mut records = Vec::new(&env);
+        for index in cursor..end {
+            if let Some(record) = env.storage().persistent().get(&DataKey::DisputeEvidence(
+                proof_id_hash.clone(),
+                dispute_sequence,
+                index,
+            )) {
+                records.push_back(record);
+            }
+        }
+        Ok(records)
+    }
+
+    pub fn get_dispute_sequence(env: Env, proof_id_hash: BytesN<32>) -> Result<u32, ProofError> {
+        let key = DataKey::Dispute(proof_id_hash.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(ProofError::DisputeNotFound);
+        }
+        Self::extend_proof_key_ttl(env.clone(), &key);
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeRound(proof_id_hash))
+            .unwrap_or(0))
     }
 
     /// Returns immutable resolver and reason metadata for a terminal decision.
@@ -2583,6 +2814,68 @@ impl ProofRegistryContract {
 
     // ── private helpers ───────────────────────────────────────────────────────
 
+    fn commit_proof_configuration(
+        env: &Env,
+        proof_id_hash: &BytesN<32>,
+        issuer_address: &Address,
+        schema_version: u32,
+    ) -> Result<ProofConfigurationCommitments, ProofError> {
+        let issuer_registry =
+            Self::get_issuer_registry(env.clone()).map_err(|_| ProofError::ProofNotFound)?;
+        let protocol_config =
+            Self::get_protocol_config(env.clone()).map_err(|_| ProofError::ProofNotFound)?;
+        let issuer_client = IssuerRegistryContractClient::new(env, &issuer_registry);
+        if issuer_client.get_config_digest_version() != earnproof_shared::CONFIG_DIGEST_VERSION {
+            return Err(ProofError::UnsupportedSchema);
+        }
+        let issuer_id = issuer_client
+            .get_issuer_id_hash(issuer_address)
+            .ok_or(ProofError::IssuerInactive)?;
+        let issuer_policy_version = issuer_client.get_issuer_policy_version(&issuer_id);
+        let issuer_policy_commitments = if issuer_policy_version == 0 {
+            IssuerPolicyCommitments {
+                encoding_version: 0,
+                category_commitment: BytesN::from_array(env, &[0; 32]),
+                jurisdiction_commitment: BytesN::from_array(env, &[0; 32]),
+            }
+        } else {
+            issuer_client
+                .get_issuer_policy_commitment_at_version(&issuer_id, &issuer_policy_version)
+                .ok_or(ProofError::UnsupportedSchema)?
+                .commitments
+        };
+        let protocol_client = ProtocolConfigContractClient::new(env, &protocol_config);
+        if protocol_client.get_config_digest_version() != earnproof_shared::CONFIG_DIGEST_VERSION {
+            return Err(ProofError::UnsupportedSchema);
+        }
+        let schema_digest = protocol_client.get_schema_policy_digest(&schema_version);
+        if schema_digest.digest_version != SCHEMA_POLICY_DIGEST_VERSION
+            || schema_digest.schema_version != schema_version
+        {
+            return Err(ProofError::UnsupportedSchema);
+        }
+        let commitments = ProofConfigurationCommitments {
+            config_digest_version: earnproof_shared::CONFIG_DIGEST_VERSION,
+            proof_registry_address: env.current_contract_address(),
+            proof_registry_digest: Self::get_config_digest(env.clone())
+                .map_err(|_| ProofError::ProofNotFound)?,
+            issuer_registry_address: issuer_registry.clone(),
+            issuer_registry_digest: issuer_client.get_config_digest(),
+            issuer_policy_version,
+            issuer_policy_commitments,
+            protocol_config_address: protocol_config.clone(),
+            protocol_config_digest: protocol_client.get_config_digest(),
+            schema_digest_version: schema_digest.digest_version,
+            schema_config_version: schema_digest.config_version,
+            schema_version,
+            schema_policy_digest: schema_digest.digest,
+        };
+        let key = DataKey::ProofConfiguration(proof_id_hash.clone());
+        env.storage().persistent().set(&key, &commitments);
+        Self::extend_proof_key_ttl(env.clone(), &key);
+        Ok(commitments)
+    }
+
     fn validate_dependency_addresses(
         env: &Env,
         issuer_registry: &Address,
@@ -3220,6 +3513,68 @@ mod test {
         assert_eq!(client.get_issuer_registry(), issuer_registry_id);
         assert!(client.is_valid_proof(&proof_id));
         assert!(!client.is_revoked(&proof_id));
+    }
+
+    #[test]
+    fn proof_configuration_commitments_are_immutable_and_queryable() {
+        let (env, client, protocol_config, issuer_registry, _issuer_registry_id) = setup();
+        let proof_id = bytes(&env, 0xa7);
+        let issuer = Address::from_str(&env, ISSUER);
+        let issuer_id = bytes(&env, 9);
+        issuer_registry.set_issuer_policy_commitments(
+            &issuer_id,
+            &earnproof_shared::IssuerPolicyCommitments {
+                encoding_version: 1,
+                category_commitment: bytes(&env, 0xa8),
+                jurisdiction_commitment: bytes(&env, 0xa9),
+            },
+        );
+
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 0xaa),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+
+        let snapshot = client
+            .get_proof_configuration_commitments(&proof_id)
+            .expect("new registrations snapshot configuration");
+        assert_eq!(
+            snapshot.issuer_registry_address,
+            client.get_issuer_registry()
+        );
+        assert_eq!(
+            snapshot.protocol_config_address,
+            client.get_protocol_config()
+        );
+        assert_eq!(snapshot.issuer_policy_version, 1);
+        assert_eq!(
+            snapshot.issuer_policy_commitments,
+            earnproof_shared::IssuerPolicyCommitments {
+                encoding_version: 1,
+                category_commitment: bytes(&env, 0xa8),
+                jurisdiction_commitment: bytes(&env, 0xa9),
+            }
+        );
+        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(
+            snapshot.schema_policy_digest,
+            protocol_config.get_schema_policy_digest(&1).digest
+        );
+
+        protocol_config.set_schema_rate_limit(&1, &50, &100);
+        assert_ne!(
+            protocol_config.get_schema_policy_digest(&1).digest,
+            snapshot.schema_policy_digest
+        );
+        assert_eq!(
+            client.get_proof_configuration_commitments(&proof_id),
+            Some(snapshot)
+        );
     }
 
     #[test]
@@ -4884,6 +5239,7 @@ mod test {
         assert!(validity.revoked);
         assert_eq!(validity.revoked_at, 500);
         assert_eq!(validity.revoked_ledger, 0);
+        assert_eq!(client.get_proof_configuration_commitments(&proof_id), None);
     }
 
     #[test]
@@ -6037,6 +6393,195 @@ mod test {
         assert_eq!(dispute.opened_by, issuer);
         assert_eq!(dispute.opened_by_class, DisputeActorClass::Issuer);
         assert_eq!(dispute.evidence_commitment, bytes(&env, 30));
+    }
+
+    #[test]
+    fn dispute_evidence_is_append_only_bounded_and_rejected_after_resolution() {
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let proof_id = bytes(&env, 0xb1);
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 0xb2),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 0xb3));
+
+        assert_eq!(
+            client.try_append_dispute_evidence(
+                &proof_id,
+                &issuer,
+                &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                &bytes(&env, 0),
+            ),
+            Err(Ok(ProofError::MalformedInput))
+        );
+        assert_eq!(
+            client.try_append_dispute_evidence(&proof_id, &issuer, &2, &bytes(&env, 0xb6)),
+            Err(Ok(ProofError::MalformedInput))
+        );
+
+        let first = client.append_dispute_evidence(
+            &proof_id,
+            &issuer,
+            &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+            &bytes(&env, 0xb4),
+        );
+        let second = client.append_dispute_evidence(
+            &proof_id,
+            &issuer,
+            &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+            &bytes(&env, 0xb5),
+        );
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.dispute_sequence, 1);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(
+            client.get_dispute_evidence_history(&proof_id, &1, &0, &16),
+            soroban_sdk::vec![&env, first.clone(), second]
+        );
+        assert_eq!(
+            client.try_append_dispute_evidence(
+                &proof_id,
+                &issuer,
+                &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                &bytes(&env, 0xb4),
+            ),
+            Err(Ok(ProofError::MalformedInput))
+        );
+
+        for index in 2..earnproof_shared::DISPUTE_EVIDENCE_HISTORY_CAPACITY {
+            client.append_dispute_evidence(
+                &proof_id,
+                &issuer,
+                &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                &bytes(&env, index as u8 + 0xc0),
+            );
+        }
+        assert_eq!(
+            client.try_append_dispute_evidence(
+                &proof_id,
+                &issuer,
+                &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                &bytes(&env, 0xdf),
+            ),
+            Err(Ok(ProofError::ProofCapacityReached))
+        );
+
+        client.resolve_dispute(&proof_id, &resolve_reason());
+        assert_eq!(
+            client.try_append_dispute_evidence(
+                &proof_id,
+                &issuer,
+                &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                &bytes(&env, 0xe0),
+            ),
+            Err(Ok(ProofError::DisputeNotOpen))
+        );
+    }
+
+    #[test]
+    fn dispute_evidence_requires_the_submitters_own_authorization() {
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        use soroban_sdk::IntoVal;
+
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let stranger = Address::from_str(&env, THIRD_PARTY);
+        let proof_id = bytes(&env, 0xb7);
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 0xb8),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 0xb9));
+
+        let auth_entry = MockAuth {
+            address: &stranger,
+            invoke: &MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "append_dispute_evidence",
+                args: (
+                    proof_id.clone(),
+                    issuer.clone(),
+                    earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                    bytes(&env, 0xba),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        };
+        env.set_auths(&[]);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.mock_auths(&[auth_entry]).append_dispute_evidence(
+                &proof_id,
+                &issuer,
+                &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+                &bytes(&env, 0xba),
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(
+            client
+                .get_dispute_evidence_history(&proof_id, &1, &0, &16)
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn reopening_dispute_advances_round_and_preserves_prior_evidence() {
+        let (env, client, _pc, _ir, _ir_id) = setup();
+        let issuer = Address::from_str(&env, ISSUER);
+        let proof_id = bytes(&env, 0xbb);
+        client.register_proof(
+            &proof_id,
+            &bytes(&env, 0xbc),
+            &issuer,
+            &1,
+            &2_000,
+            &None,
+            &bytes(&env, 1),
+        );
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 0xbd));
+        client.append_dispute_evidence(
+            &proof_id,
+            &issuer,
+            &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+            &bytes(&env, 0xbe),
+        );
+        client.resolve_dispute(&proof_id, &resolve_reason());
+
+        client.open_dispute(&proof_id, &issuer, &bytes(&env, 0xbf));
+        assert_eq!(client.get_dispute_sequence(&proof_id), 2);
+        assert_eq!(
+            client
+                .get_dispute_evidence_history(&proof_id, &1, &0, &16)
+                .len(),
+            1
+        );
+        assert!(client
+            .get_dispute_evidence_history(&proof_id, &2, &0, &16)
+            .is_empty());
+
+        client.append_dispute_evidence(
+            &proof_id,
+            &issuer,
+            &earnproof_shared::DISPUTE_EVIDENCE_HASH_ALGORITHM_SHA256,
+            &bytes(&env, 0xc0),
+        );
+        let second_round = client.get_dispute_evidence_history(&proof_id, &2, &0, &16);
+        assert_eq!(second_round.len(), 1);
+        assert_eq!(second_round.get(0).unwrap().sequence, 1);
+        assert_eq!(second_round.get(0).unwrap().dispute_sequence, 2);
     }
 
     #[test]

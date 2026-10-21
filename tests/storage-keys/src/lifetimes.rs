@@ -107,7 +107,7 @@ fn per_record_namespaces_hold_one_entry_per_record() {
     // their old entries.
     assert_eq!(
         keys_in(env, &deployment.issuers_id, StorageClass::Persistent).len(),
-        15
+        18
     );
 
     // Proof records, TTL trackers, per-issuer accounting, schema rate usage,
@@ -115,7 +115,7 @@ fn per_record_namespaces_hold_one_entry_per_record() {
     // independent persistent keys.
     assert_eq!(
         keys_in(env, &deployment.proofs_id, StorageClass::Persistent).len(),
-        16
+        23
     );
 
     // Schema history, proof-type approvals, predecessor links, payload
