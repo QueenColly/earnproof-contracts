@@ -12,6 +12,7 @@
 62	IncompatibleInterfaceVersion	ContractError	common	returned	after-caller-change	400
 63	AdminNominationExpired	ContractError	common	returned	after-operator-action	409
 64	BatchTooLarge	ContractError	common	returned	after-caller-change	400
+65	DeploymentIdentityMismatch	ContractError	common	returned	after-operator-action	409
 80	ProtocolPaused	ContractError	common	reserved	after-operator-action	503
 90	NoUpgradeApproval	ContractError	common	returned	after-operator-action	412
 91	UpgradeTimelockNotElapsed	ContractError	common	returned	after-operator-action	409

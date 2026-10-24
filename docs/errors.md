@@ -90,6 +90,7 @@ A Soroban contract error is a type and a number. It carries no message, no paylo
 | 62 | `IncompatibleInterfaceVersion` | `ContractError` | common | returned | after-caller-change | 400 |
 | 63 | `AdminNominationExpired` | `ContractError` | common | returned | after-operator-action | 409 |
 | 64 | `BatchTooLarge` | `ContractError` | common | returned | after-caller-change | 400 |
+| 65 | `DeploymentIdentityMismatch` | `ContractError` | common | returned | after-operator-action | 409 |
 | 80 | `ProtocolPaused` | `ContractError` | common | reserved | after-operator-action | 503 |
 | 90 | `NoUpgradeApproval` | `ContractError` | common | returned | after-operator-action | 412 |
 | 91 | `UpgradeTimelockNotElapsed` | `ContractError` | common | returned | after-operator-action | 409 |
@@ -278,6 +279,17 @@ A Soroban contract error is a type and a number. It carries no message, no paylo
 - Remediation: Split the request into batches of at most MAX_SCHEMA_STATUS_BATCH entries.
 - Suggested HTTP status: 400
 - Client message: "Request batch is too large"
+
+### 65 - `DeploymentIdentityMismatch`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: A dependency, or the pinned deployment domain, reports a network or deployment domain different from the consumer's identity.
+- Remediation: Bind a dependency from the same deployment domain, or set the matching domain on the dependency, then retry.
+- Suggested HTTP status: 409
+- Client message: "Dependency belongs to a different deployment"
 
 ### 80 - `ProtocolPaused`
 

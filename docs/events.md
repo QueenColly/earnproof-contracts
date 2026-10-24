@@ -101,6 +101,25 @@ verifiers understand when a proof became invalid without a follow-up query;
 For a legacy record without a recorded revocation sequence,
 `revoked_ledger` is `0` and `revoked_at` remains authoritative.
 
+### Lifecycle events shared by every contract
+
+`issuer-registry`, `proof-registry`, and `protocol-config` publish the same
+lifecycle events with the same payloads.
+
+| Topic | Emitted by | Payload |
+|---|---|---|
+| `deployment_domain_set` | `set_deployment_domain`, `initialize_in_domain` (proof-registry) | `deployment_domain`, `commitment`, `set_by` |
+| `storage_layout_migration_started` | `begin_layout_migration` | `from_layout`, `to_layout`, `started_by` |
+| `storage_layout_migrated` | `complete_layout_migration` | `from_layout`, `to_layout`, `completed_by` |
+| `decommission_grace_started` | `begin_decommission_grace` | `successor`, `grace_started_ledger`, `grace_ends_ledger`, `started_by` |
+| `contract_decommissioned` | `activate_successor`, `finalize_decommission` | unchanged payload of each contract |
+
+Replays that the contract accepts as no-ops (the same deployment domain, the
+same pending layout target) publish nothing. See
+[`deployment-identity.md`](./deployment-identity.md),
+[`storage-layout-versions.md`](./storage-layout-versions.md), and
+[`decommission-grace.md`](./decommission-grace.md).
+
 ### Silent entry points
 
 Not every mutation emits. These do not, and the omission is deliberate:

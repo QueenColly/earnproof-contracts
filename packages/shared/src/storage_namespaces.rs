@@ -124,6 +124,14 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 105] = [
     },
     StorageNamespace {
         contract: "issuer-registry",
+        namespace: "DecommissionGrace",
+        arity: 0,
+        class: StorageClass::Instance,
+        value: "DecommissionState",
+        owner: "registry operator",
+    },
+    StorageNamespace {
+        contract: "issuer-registry",
         namespace: "Decommissioned",
         arity: 0,
         class: StorageClass::Instance,
@@ -468,10 +476,26 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 105] = [
     },
     StorageNamespace {
         contract: "proof-registry",
+        namespace: "DecommissionGrace",
+        arity: 0,
+        class: StorageClass::Instance,
+        value: "DecommissionState",
+        owner: "deployment operator",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
         namespace: "Decommissioned",
         arity: 0,
         class: StorageClass::Instance,
         value: "bool",
+        owner: "deployment operator",
+    },
+    StorageNamespace {
+        contract: "proof-registry",
+        namespace: "DeploymentDomain",
+        arity: 0,
+        class: StorageClass::Instance,
+        value: "BytesN<32>",
         owner: "deployment operator",
     },
     StorageNamespace {
@@ -780,10 +804,26 @@ pub const STORAGE_NAMESPACES: [StorageNamespace; 105] = [
     },
     StorageNamespace {
         contract: "protocol-config",
+        namespace: "DecommissionGrace",
+        arity: 0,
+        class: StorageClass::Instance,
+        value: "DecommissionState",
+        owner: "protocol operator",
+    },
+    StorageNamespace {
+        contract: "protocol-config",
         namespace: "Decommissioned",
         arity: 0,
         class: StorageClass::Instance,
         value: "bool",
+        owner: "protocol operator",
+    },
+    StorageNamespace {
+        contract: "protocol-config",
+        namespace: "DeploymentDomain",
+        arity: 0,
+        class: StorageClass::Instance,
+        value: "BytesN<32>",
         owner: "protocol operator",
     },
     StorageNamespace {

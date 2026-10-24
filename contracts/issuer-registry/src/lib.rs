@@ -46,6 +46,14 @@ enum DataKey {
     SuccessorNomination,
     MigrationCheckpoint,
     Decommissioned,
+    /// Write-once deployment domain mixed into the deployment identity.
+    DeploymentDomain,
+    /// Decommission grace record; absent until grace starts.
+    DecommissionGrace,
+    /// Active storage layout version; absent on legacy deployments (layout 1).
+    StorageLayoutVersion,
+    /// Target of a started, incomplete storage layout step.
+    StorageLayoutMigration,
     PendingAdmin,
     PendingAdminNominatedAt,
     PendingAdminExpiresAt,
@@ -346,6 +354,39 @@ pub struct ContractDecommissioned {
 // Contract implementation
 // ---------------------------------------------------------------------------
 
+/// Emitted once when the write-once deployment domain is set.
+#[contractevent]
+pub struct DeploymentDomainSet {
+    pub deployment_domain: BytesN<32>,
+    pub commitment: BytesN<32>,
+    pub set_by: Address,
+}
+
+/// Emitted when a reviewed storage layout step starts.
+#[contractevent]
+pub struct StorageLayoutMigrationStarted {
+    pub from_layout: u32,
+    pub to_layout: u32,
+    pub started_by: Address,
+}
+
+/// Emitted when a reviewed storage layout step completes.
+#[contractevent]
+pub struct StorageLayoutMigrated {
+    pub from_layout: u32,
+    pub to_layout: u32,
+    pub completed_by: Address,
+}
+
+/// Emitted when the read-only decommission grace phase starts.
+#[contractevent]
+pub struct DecommissionGraceStarted {
+    pub successor: Address,
+    pub grace_started_ledger: u32,
+    pub grace_ends_ledger: u32,
+    pub started_by: Address,
+}
+
 #[contractimpl]
 impl IssuerRegistryContract {
     pub fn grant_governance_role(
@@ -519,7 +560,7 @@ impl IssuerRegistryContract {
     }
 
     fn ensure_not_decommissioned(env: &Env) -> Result<(), IssuerError> {
-        if Self::is_decommissioned(env.clone()) {
+        if Self::is_decommissioned(env.clone()) || Self::in_decommission_grace(env) {
             Err(IssuerError::InvalidTransition)
         } else {
             Ok(())
@@ -571,6 +612,10 @@ impl IssuerRegistryContract {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1_u32);
+        env.storage().instance().set(
+            &DataKey::StorageLayoutVersion,
+            &ISSUER_REGISTRY_STORAGE_LAYOUT,
+        );
         let genesis = GenesisRecord {
             genesis_id: earnproof_shared::compute_genesis_id(&env, "earnproof_issuer_registry"),
             initialized_at_ledger: env.ledger().sequence(),
@@ -918,6 +963,304 @@ impl IssuerRegistryContract {
         }
         .publish(&env);
         Ok(())
+    }
+
+    // ── capability bitmap, storage layout, deployment identity, grace ─────────
+
+    /// Versioned capability report. The bitmap is a constant of the deployed
+    /// code; only `contract_version` is read from storage.
+    pub fn get_capabilities(env: Env) -> ContractCapabilities {
+        capability_report(
+            ISSUER_REGISTRY_INTERFACE_VERSION,
+            Self::get_contract_version(env),
+            ISSUER_REGISTRY_CAPABILITIES,
+        )
+    }
+
+    /// Whether this build implements `capability`. Undefined or out-of-range
+    /// identifiers report `false`.
+    pub fn has_capability(_env: Env, capability: u32) -> bool {
+        earnproof_shared::has_capability(
+            CAPABILITY_BITMAP_VERSION,
+            ISSUER_REGISTRY_CAPABILITIES,
+            capability,
+        )
+    }
+
+    /// Active storage layout, code layout, pending migration target, and
+    /// compatibility state.
+    pub fn get_storage_layout(env: Env) -> StorageLayoutStatus {
+        let active = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(LEGACY_STORAGE_LAYOUT);
+        let pending = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageLayoutMigration);
+        storage_layout_status(active, ISSUER_REGISTRY_STORAGE_LAYOUT, pending)
+    }
+
+    /// Admin-only: records the start of the reviewed layout step to
+    /// `target_layout`. Replaying the same target is a no-op.
+    pub fn begin_layout_migration(
+        env: Env,
+        target_layout: u32,
+    ) -> Result<StorageLayoutStatus, ContractError> {
+        Self::ensure_lifecycle_active(&env)?;
+        let admin = Self::get_admin(env.clone())?;
+        Self::require_auth(&admin);
+        let status = Self::get_storage_layout(env.clone());
+        match status.compatibility {
+            StorageLayoutCompatibility::MigrationInProgress => {
+                return if status.migration_target == target_layout {
+                    Ok(status)
+                } else {
+                    Err(ContractError::InvalidState)
+                };
+            }
+            StorageLayoutCompatibility::MigrationRequired => {}
+            _ => return Err(ContractError::InvalidState),
+        }
+        if status.migration_target != target_layout
+            || !is_reviewed_layout_migration(status.active_layout, target_layout)
+        {
+            return Err(ContractError::InvalidInput);
+        }
+        if Self::get_migration_status(env.clone()).is_some_and(|migration| !migration.complete) {
+            return Err(ContractError::InvalidState);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageLayoutMigration, &target_layout);
+        Self::extend_instance_ttl(env.clone());
+        StorageLayoutMigrationStarted {
+            from_layout: status.active_layout,
+            to_layout: target_layout,
+            started_by: admin,
+        }
+        .publish(&env);
+        Ok(Self::get_storage_layout(env))
+    }
+
+    /// Admin-only: completes the started layout step. The active layout moves
+    /// only here, by exactly the recorded reviewed step.
+    pub fn complete_layout_migration(
+        env: Env,
+        target_layout: u32,
+    ) -> Result<StorageLayoutStatus, ContractError> {
+        Self::ensure_lifecycle_active(&env)?;
+        let admin = Self::get_admin(env.clone())?;
+        Self::require_auth(&admin);
+        let pending: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageLayoutMigration)
+            .ok_or(ContractError::InvalidState)?;
+        let active = Self::get_storage_layout(env.clone()).active_layout;
+        if pending != target_layout
+            || target_layout > ISSUER_REGISTRY_STORAGE_LAYOUT
+            || !is_reviewed_layout_migration(active, target_layout)
+        {
+            return Err(ContractError::InvalidState);
+        }
+        if Self::get_migration_status(env.clone()).is_some_and(|migration| !migration.complete) {
+            return Err(ContractError::InvalidState);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageLayoutVersion, &target_layout);
+        env.storage()
+            .instance()
+            .remove(&DataKey::StorageLayoutMigration);
+        Self::extend_instance_ttl(env.clone());
+        StorageLayoutMigrated {
+            from_layout: active,
+            to_layout: target_layout,
+            completed_by: admin,
+        }
+        .publish(&env);
+        Ok(Self::get_storage_layout(env))
+    }
+
+    /// Admin-only, write-once: sets the deployment domain mixed into this
+    /// contract's deployment identity. Replaying the same domain is a no-op;
+    /// a different domain is rejected.
+    pub fn set_deployment_domain(
+        env: Env,
+        deployment_domain: BytesN<32>,
+    ) -> Result<DeploymentIdentity, ContractError> {
+        Self::ensure_lifecycle_active(&env)?;
+        let admin = Self::get_admin(env.clone())?;
+        Self::require_auth(&admin);
+        if !is_valid_deployment_domain(&env, &deployment_domain) {
+            return Err(ContractError::InvalidInput);
+        }
+        let identity = deployment_identity(&env, &deployment_domain);
+        if let Some(existing) = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::DeploymentDomain)
+        {
+            return if existing == deployment_domain {
+                Ok(identity)
+            } else {
+                Err(ContractError::DeploymentIdentityMismatch)
+            };
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DeploymentDomain, &deployment_domain);
+        Self::extend_instance_ttl(env.clone());
+        DeploymentDomainSet {
+            deployment_domain,
+            commitment: identity.commitment.clone(),
+            set_by: admin,
+        }
+        .publish(&env);
+        Ok(identity)
+    }
+
+    /// Network and deployment-domain identity, or `None` before a domain is set.
+    pub fn get_deployment_identity(env: Env) -> Option<DeploymentIdentity> {
+        env.storage()
+            .instance()
+            .get::<_, BytesN<32>>(&DataKey::DeploymentDomain)
+            .map(|domain| deployment_identity(&env, &domain))
+    }
+
+    /// Admin-only: enters the read-only grace phase toward the nominated
+    /// successor. The window is fixed once started.
+    pub fn begin_decommission_grace(
+        env: Env,
+        proposal_id: BytesN<32>,
+        grace_ledgers: u32,
+    ) -> Result<DecommissionState, ContractError> {
+        Self::ensure_lifecycle_active(&env)?;
+        let admin = Self::get_admin(env.clone())?;
+        Self::require_auth(&admin);
+        let successor: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Successor)
+            .ok_or(ContractError::NotFound)?;
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::StorageLayoutMigration)
+            || Self::get_migration_status(env.clone()).is_some_and(|migration| !migration.complete)
+        {
+            return Err(ContractError::InvalidState);
+        }
+        let started = env.ledger().sequence();
+        let ends =
+            grace_end_ledger(started, grace_ledgers).ok_or(ContractError::InvalidTimingConfig)?;
+        Self::consume_proposal(&env, &proposal_id)?;
+        let state = DecommissionState {
+            state_version: DECOMMISSION_STATE_VERSION,
+            phase: DecommissionPhase::Grace,
+            successor: Some(successor.clone()),
+            grace_started_ledger: started,
+            grace_ends_ledger: ends,
+            finalized_ledger: 0,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::DecommissionGrace, &state);
+        Self::extend_instance_ttl(env.clone());
+        DecommissionGraceStarted {
+            successor,
+            grace_started_ledger: started,
+            grace_ends_ledger: ends,
+            started_by: admin,
+        }
+        .publish(&env);
+        Ok(state)
+    }
+
+    /// Admin-only: moves a grace record to the terminal decommissioned state
+    /// at or after `grace_ends_ledger`.
+    pub fn finalize_decommission(
+        env: Env,
+        proposal_id: BytesN<32>,
+    ) -> Result<DecommissionState, ContractError> {
+        if Self::is_decommissioned(env.clone()) {
+            return Err(ContractError::InvalidState);
+        }
+        let admin = Self::get_admin(env.clone())?;
+        Self::require_auth(&admin);
+        let mut state: DecommissionState = env
+            .storage()
+            .instance()
+            .get(&DataKey::DecommissionGrace)
+            .ok_or(ContractError::InvalidState)?;
+        let now = env.ledger().sequence();
+        if state.phase != DecommissionPhase::Grace {
+            return Err(ContractError::InvalidState);
+        }
+        if !can_finalize_decommission(&state, now) {
+            return Err(ContractError::InvalidTimingConfig);
+        }
+        let successor = state.successor.clone().ok_or(ContractError::InvalidState)?;
+        Self::consume_proposal(&env, &proposal_id)?;
+        state.phase = DecommissionPhase::Finalized;
+        state.finalized_ledger = now;
+        env.storage()
+            .instance()
+            .set(&DataKey::DecommissionGrace, &state);
+        env.storage()
+            .instance()
+            .set(&DataKey::Decommissioned, &true);
+        Self::extend_instance_ttl(env.clone());
+        ContractDecommissioned {
+            proposal_id,
+            old_instance: env.current_contract_address(),
+            successor_instance: successor,
+            activated_by: admin,
+        }
+        .publish(&env);
+        Ok(state)
+    }
+
+    /// Current decommission phase. Legacy immediate decommissions report
+    /// `Finalized` with zero ledgers.
+    pub fn get_decommission_state(env: Env) -> DecommissionState {
+        if let Some(state) = env
+            .storage()
+            .instance()
+            .get::<_, DecommissionState>(&DataKey::DecommissionGrace)
+        {
+            return state;
+        }
+        let phase = if Self::is_decommissioned(env.clone()) {
+            DecommissionPhase::Finalized
+        } else {
+            DecommissionPhase::Active
+        };
+        DecommissionState {
+            state_version: DECOMMISSION_STATE_VERSION,
+            phase,
+            successor: env.storage().instance().get(&DataKey::Successor),
+            grace_started_ledger: 0,
+            grace_ends_ledger: 0,
+            finalized_ledger: 0,
+        }
+    }
+
+    fn in_decommission_grace(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, DecommissionState>(&DataKey::DecommissionGrace)
+            .is_some_and(|state| state.phase == DecommissionPhase::Grace)
+    }
+
+    fn ensure_lifecycle_active(env: &Env) -> Result<(), ContractError> {
+        if Self::is_decommissioned(env.clone()) || Self::in_decommission_grace(env) {
+            Err(ContractError::InvalidState)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn keepalive_instance(env: Env) -> bool {
@@ -3046,6 +3389,9 @@ impl IssuerRegistryContract {
     fn assert_operational(env: &Env) {
         if Self::is_decommissioned(env.clone()) {
             panic!("contract is decommissioned");
+        }
+        if Self::in_decommission_grace(env) {
+            panic!("contract is in decommission grace");
         }
         if Self::get_migration_status(env.clone()).is_some_and(|status| !status.complete) {
             panic!("storage migration in progress");

@@ -89,7 +89,7 @@ fn compromise_is_terminal_and_failed_transitions_do_not_advance() {
     let compromised = client.record_signing_key_compromise(&issuer_id, &key_hash, &1);
     assert_eq!(compromised.sequence, 2);
     assert_eq!(
-        compromised.transition,
+        lifecycle.transition,
         SigningKeyLifecycleTransition::Compromised
     );
     assert_eq!(

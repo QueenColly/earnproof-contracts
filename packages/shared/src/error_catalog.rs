@@ -289,6 +289,18 @@ pub const ERROR_CATALOG: [ErrorSpec; 70] = [
         client_message: "Request batch is too large",
     },
     ErrorSpec {
+        code: 65,
+        name: "DeploymentIdentityMismatch",
+        enum_name: "ContractError",
+        domain: Domain::Common,
+        status: Status::Returned,
+        cause: "A dependency, or the pinned deployment domain, reports a network or deployment domain different from the consumer's identity.",
+        retry: Retry::AfterOperatorAction,
+        remediation: "Bind a dependency from the same deployment domain, or set the matching domain on the dependency, then retry.",
+        http_status: 409,
+        client_message: "Dependency belongs to a different deployment",
+    },
+    ErrorSpec {
         code: 80,
         name: "ProtocolPaused",
         enum_name: "ContractError",

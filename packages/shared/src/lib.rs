@@ -13,6 +13,31 @@ pub use storage_namespaces::{StorageClass, StorageNamespace, STORAGE_NAMESPACES}
 pub mod error_catalog;
 
 pub use error_catalog::{Domain, ErrorSpec, Retry, Status, ERROR_CATALOG};
+pub mod capabilities;
+pub mod decommission;
+pub mod deployment_identity;
+pub mod storage_layout;
+
+pub use capabilities::{
+    capabilities_are_additive, capabilities_are_valid, capability_bit, capability_report,
+    has_capability, ContractCapabilities, CAPABILITY_BITMAP_VERSION, ISSUER_REGISTRY_CAPABILITIES,
+    PROOF_REGISTRY_CAPABILITIES, PROTOCOL_CONFIG_CAPABILITIES,
+};
+pub use decommission::{
+    can_finalize_decommission, decommission_phase_permits_mutation, grace_end_ledger,
+    is_decommission_transition_allowed, DecommissionPhase, DecommissionState,
+    DECOMMISSION_STATE_VERSION, MAX_DECOMMISSION_GRACE_LEDGERS, MIN_DECOMMISSION_GRACE_LEDGERS,
+};
+pub use deployment_identity::{
+    dependency_identity_matches, deployment_identity, deployment_identity_commitment,
+    is_valid_deployment_domain, DeploymentIdentity, DEPLOYMENT_IDENTITY_VERSION,
+};
+pub use storage_layout::{
+    is_reviewed_layout_migration, next_layout_step, storage_layout_status,
+    StorageLayoutCompatibility, StorageLayoutStatus, ISSUER_REGISTRY_STORAGE_LAYOUT,
+    LEGACY_STORAGE_LAYOUT, PROOF_REGISTRY_STORAGE_LAYOUT, PROTOCOL_CONFIG_STORAGE_LAYOUT,
+    STORAGE_LAYOUT_STATUS_VERSION,
+};
 
 // Export upgrade approval types for use across all contracts
 pub use soroban_sdk::String as SorobanString;
@@ -648,7 +673,10 @@ impl InterfaceVersion {
 }
 
 /// The interface version implemented by `issuer-registry`.
-pub const ISSUER_REGISTRY_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 1, 0);
+///
+/// 1.2.0 adds `get_capabilities`, `has_capability`, `get_storage_layout`,
+/// `get_deployment_identity`, and the decommission grace entrypoints.
+pub const ISSUER_REGISTRY_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 2, 0);
 
 /// The interface version implemented by `protocol-config`.
 pub const PROTOCOL_CONFIG_INTERFACE_VERSION: InterfaceVersion = InterfaceVersion::new(1, 3, 0);
@@ -925,6 +953,9 @@ pub enum ContractError {
     /// A cross-contract dependency reported an interface version outside the
     /// range the consumer accepts.
     IncompatibleInterfaceVersion = 62,
+    /// A cross-contract dependency reported a deployment identity (network
+    /// and deployment domain) different from the consumer's own.
+    DeploymentIdentityMismatch = 65,
 
     // Protocol state errors (80-99)
     ProtocolPaused = 80,
