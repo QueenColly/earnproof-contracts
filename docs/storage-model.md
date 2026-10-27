@@ -151,11 +151,13 @@ commitment hashes and public transition metadata only. The original
 - `initialize()`: extends on setup
 - `approve_upgrade()`, `upgrade_contract()`: extends on upgrades
 
-#### Persistent Storage (Per-Proof and Consent Commitment)
+#### Persistent Storage (Per-Proof, Dispute, and Consent Commitment)
 
 | Entry | DataKey | Access Pattern | Behavior on Expiry | Fail-Closed |
 |-------|---------|-----------------|-------------------|------------|
 | Proof Record | `Proof(hash)` | `get_proof(hash)` reads & extends; `is_valid_proof(hash)` reads & extends | ProofNotFound error | ✓ Yes |
+| Dispute Record | `Dispute(hash)` | `get_dispute(hash)` and decision metadata query extend | DisputeNotFound error | ✓ Yes |
+| Dispute Decision Metadata | `DisputeDecisionMetadata(hash)` | written atomically with resolve/reject; query returns `None` for legacy decisions | `None` for open, withdrawn, or legacy disputes | ✓ Yes |
 | Proof Context Commitments | `ProofContext(hash)` | `get_proof_context_commitments(hash)` reads & extends when present | Returns `None` for legacy records; ProofNotFound for an unknown proof | ✓ Yes |
 | Subject Pseudonym Commitment | `ProofSubjectPseudonym(hash)` | `get_proof_pseudonym_commitment(hash)` reads & extends with proof record | Returns `None` when omitted or on legacy records | ✓ Yes |
 | Pause Acknowledger | `PauseAcknowledger(address)` | admin-managed role lookup | Returns false | ✓ Yes |
@@ -164,6 +166,7 @@ commitment hashes and public transition metadata only. The original
 
 **Persistent TTL Extension**: Called via `extend_proof_key_ttl(key)` on:
 - `register_proof()`: extends on creation
+- `open_dispute()`, terminal transitions, and dispute queries: extend dispute records and decision metadata
 - `get_proof()`: extends on read (extend-on-read pattern)
 - `revoke_proof()`, `admin_revoke_proof()`: extend on revocation
 - `commit_disclosure_consent()`: stores and extends the hash-only receipt commitment

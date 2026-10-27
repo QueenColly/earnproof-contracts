@@ -358,7 +358,28 @@ Issuer authorization is required for normal proof registration and revocation. A
 ### Proof Registry Events
 
 The proof-registry contract currently emits no typed events. Proof lifecycle changes (registration, revocation) are stored on-chain via `ProofRecord` updates but are not announced via Soroban event topics. Future contract versions are expected to add events for proof registration and revocation. See [tests/fixtures/events/proof-registry/](../tests/fixtures/events/proof-registry/).
-Every successful mutation emits exactly one typed event. Failed, unauthorized, duplicate, expired, or paused-protocol operations emit no success event.
+Every successful mutation emits its documented typed event or events. Failed,
+unauthorized, duplicate, expired, or paused-protocol operations emit no success
+event.
+
+#### Dispute decisions
+
+`resolve_dispute(proof_id_hash, reason)` and
+`reject_dispute(proof_id_hash, reason)` require a
+`DisputeDecisionReason { version: 1, code, reason_commitment }`. Version 1 uses
+code `1` for resolution and codes `2` through `5` for rejection (claim
+unsubstantiated, duplicate, out of scope, and procedural). The optional
+`reason_commitment` is an opaque 32-byte commitment to rationale held off
+chain; callers must never submit evidence or free-form reason text.
+
+Successful decisions retain the legacy `dispute_resolved` or
+`dispute_rejected` event and then emit `dispute_decision_committed_v2` with the
+reason version/code, optional commitment, resolver address/role, ledger, and
+timestamp. `get_dispute_decision_metadata(proof_id_hash)` returns `None` for
+open, withdrawn, and legacy terminal disputes. New dispute records clear any
+prior decision sidecar. Existing serialized `DisputeRecord` values remain
+readable without migration, but the required decision arguments change the
+invocation ABI and require coordinated backend deployment.
 
 All payloads contain only public hashes, addresses, schema version, timestamps, and expiration. No payment amounts, wallet history, personal names, or raw credential data are included.
 
