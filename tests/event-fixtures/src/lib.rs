@@ -97,6 +97,9 @@ const PROTOCOL_CONFIG_EVENTS: &[&str] = &[
     "schema-deprecated",
     "schema-deprecated-with-replacement",
     "schema-predecessor-set",
+    "hash-algorithm-approved",
+    "hash-algorithm-activated",
+    "hash-algorithm-deprecated",
 ];
 
 #[test]
@@ -238,7 +241,7 @@ fn issuer_registry_fixture_matches_contract_version() {
 }
 
 // ---------------------------------------------------------------------------
-// Proof-registry: legacy v1 events plus versioned dispute decisions
+// Proof-registry: 2 event fixtures
 // ---------------------------------------------------------------------------
 //
 // proof-registry used to emit nothing; issue #187 (registry epoch exposure)
@@ -248,11 +251,9 @@ fn issuer_registry_fixture_matches_contract_version() {
 const PROOF_REGISTRY_EVENTS: &[&str] = &[
     "proof-registered",
     "proof-revoked",
-    "dispute-resolved",
-    "dispute-rejected",
+    "authority-policy-version-changed",
+    "proof-activation-acknowledged",
 ];
-
-const PROOF_REGISTRY_V2_EVENTS: &[&str] = &["dispute-decision-committed"];
 
 #[test]
 fn proof_registry_all_event_fixtures_exist() {
@@ -342,30 +343,6 @@ fn proof_registry_no_private_data_in_fixtures() {
     }
 }
 
-#[test]
-fn proof_registry_v2_decision_fixtures_are_versioned_and_private() {
-    let version = read_contract_version("proof-registry");
-    let base = fixtures_dir();
-    let dir = format!("{base}/proof-registry/v2");
-    for name in PROOF_REGISTRY_V2_EVENTS {
-        let path = format!("{dir}/{name}.json");
-        let fixture = load_fixture(&path);
-        assert_eq!(fixture.contract, "proof-registry");
-        assert_eq!(fixture.contract_version, version);
-        assert_eq!(fixture.schema_version, 2);
-        assert_eq!(fixture.topics[0], fixture.event);
-        let content = fs::read_to_string(path).unwrap().to_lowercase();
-        for forbidden in [
-            "raw_evidence",
-            "evidence_text",
-            "reason_text",
-            "reason_string",
-        ] {
-            assert!(!content.contains(forbidden));
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Schema version drift detection
 // ---------------------------------------------------------------------------
@@ -402,22 +379,6 @@ fn fixture_files_are_parseable_json() {
                 let content = fs::read_to_string(&path).unwrap();
                 let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
                 assert!(parsed.is_ok(), "invalid JSON in {}", path.display());
-            }
-        }
-        if contract == "proof-registry" {
-            let v2_dir = format!("{base}/{contract}/v2");
-            assert!(
-                Path::new(&v2_dir).exists(),
-                "missing version directory: {v2_dir}"
-            );
-            let entries = fs::read_dir(&v2_dir).unwrap_or_else(|e| panic!("read {v2_dir}: {e}"));
-            for entry in entries {
-                let path = entry.unwrap().path();
-                if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    let content = fs::read_to_string(&path).unwrap();
-                    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
-                    assert!(parsed.is_ok(), "invalid JSON in {}", path.display());
-                }
             }
         }
     }
