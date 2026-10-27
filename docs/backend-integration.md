@@ -489,3 +489,22 @@ metadata_hash = sha256(canonical_public_issuer_metadata)
 Do not send exact income, raw transaction lists, personal names, emails, or full wallet history to contracts. Store only hashes, status, schema version, issuer address, expiration, and timestamps.
 
 For the complete list of every storage key, TTL policy, lifecycle event, and privacy boundary see the [Storage Model](./storage-model.md) reference.
+
+
+### Revocation Checkpoints
+
+Indexers can verify revocation drift using the `/api/v1/registry/revocation-checkpoint` query. 
+The checkpoint commitment is a deterministic Sha256 chained hash.
+
+**Verification Algorithm (Pseudocode):**
+```python
+def verify_checkpoint(events, expected_root):
+    current_root = ""
+    for event in events:
+        if event.type in ["revoke", "archive"]:
+            hasher = sha256()
+            hasher.update(current_root)
+            hasher.update(event.proof_id)
+            hasher.update(event.ledger_height)
+            current_root = hasher.hexdigest()
+    assert current_root == expected_root

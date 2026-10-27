@@ -344,3 +344,16 @@ env.as_contract(&contract_address, || {
 - **Recovery**: Admin re-registers/re-approves after expiry; no in-place restoration
 
 For operational runbooks, see `docs/emergency-operations.md`.
+
+
+## Retention, consent withdrawal and policy version entries
+
+| Contract | DataKey | Class | Notes |
+|---|---|---|---|
+| protocol-config | `HistoryRetention(kind)` | persistent | Cap, revision and prune watermark per history kind |
+| proof-registry | `ConsentWithdrawal(sequence)` | persistent | Immutable withdrawal record |
+| proof-registry | `ConsentWithdrawalIndex(proof, policy)` | persistent | Withdrawn marker, stores the sequence |
+| proof-registry | `ConsentWithdrawalCount` | instance | Latest withdrawal sequence |
+| proof-registry | `ProofPolicyVersions(proof)` | persistent | Written once at typed registration |
+
+See [history-retention-and-event-ranges.md](history-retention-and-event-ranges.md).

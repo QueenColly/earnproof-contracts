@@ -9,10 +9,9 @@
 //! the fixtures usable as a compatibility contract for indexers rather than
 //! documentation that happened to be true once.
 
-use crate::harness::{hash, read_events, Deployment, ObservedEvent, APPROVED_SCHEMA};
-use earnproof_shared::DisputeDecisionReason;
+use crate::harness::{hash, read_events, Deployment, ObservedEvent};
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, Env, Symbol, TryFromVal, Val};
+use soroban_sdk::{Address, BytesN, Env, Symbol, TryFromVal, Val};
 
 /// Every topic the fixtures declare, with the payload fields they promise.
 ///
@@ -41,6 +40,27 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
     ("schema_approved", &["version"]),
     ("schema_deprecated", &["version"]),
     ("schema_predecessor_set", &["version", "predecessor"]),
+    (
+        "history_retention_set",
+        &[
+            "kind",
+            "previous_max_entries",
+            "max_entries",
+            "revision",
+            "oldest_retained",
+            "changed_by",
+        ],
+    ),
+    (
+        "consent_withdrawn",
+        &[
+            "proof_id_hash",
+            "policy_hash",
+            "sequence",
+            "reason_code",
+            "commitment_hash",
+        ],
+    ),
     // issuer-registry
     (
         "issuer_registered",
@@ -110,15 +130,17 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "issuer_policy_commitments_changed",
+        "issuer_rotation_nominated",
         &[
             "issuer_id_hash",
-            "commitments",
-            "version",
-            "effective_ledger",
-            "effective_timestamp",
-            "changed_by",
+            "old_address",
+            "new_address",
+            "expires_at_ledger",
         ],
+    ),
+    (
+        "issuer_rotation_cancelled",
+        &["issuer_id_hash", "cancelled_by"],
     ),
     // proof-registry
     (
@@ -130,7 +152,6 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "created_ledger",
             "created_at",
             "expires_at",
-            "configuration_commitments",
             "epoch",
         ],
     ),
@@ -138,28 +159,14 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
         "proof_registered_with_payload",
         &[
             "proof_id_hash",
+            "issuer_address",
+            "schema_version",
+            "created_ledger",
+            "created_at",
+            "expires_at",
             "payload_len",
             "payload_hash",
-            "configuration_commitments",
             "epoch",
-        ],
-    ),
-    (
-        "proof_registered_in_batch",
-        &[
-            "proof_id_hash",
-            "issuer_address",
-            "configuration_commitments",
-        ],
-    ),
-    (
-        "dispute_opened",
-        &[
-            "proof_id_hash",
-            "dispute_sequence",
-            "opened_by",
-            "opened_by_class",
-            "opened_at",
         ],
     ),
     (
@@ -170,6 +177,9 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "revoked_ledger",
             "by_admin",
             "epoch",
+            "policy_version",
+            "actor_role",
+            "authorization_domain",
         ],
     ),
     (
@@ -179,39 +189,6 @@ const DECLARED_EVENTS: &[(&str, &[&str])] = &[
             "policy_hash",
             "receipt_version",
             "commitment_hash",
-        ],
-    ),
-    (
-        "dispute_resolved",
-        &[
-            "proof_id_hash",
-            "resolved_by",
-            "resolved_by_class",
-            "resolved_at",
-        ],
-    ),
-    ("dispute_evidence_committed", &["proof_id_hash", "record"]),
-    (
-        "dispute_rejected",
-        &[
-            "proof_id_hash",
-            "rejected_by",
-            "rejected_by_class",
-            "rejected_at",
-        ],
-    ),
-    (
-        "dispute_decision_committed_v2",
-        &[
-            "proof_id_hash",
-            "decision_status",
-            "reason_version",
-            "reason_code",
-            "reason_commitment",
-            "resolver",
-            "resolver_role",
-            "ledger",
-            "timestamp",
         ],
     ),
 ];
@@ -333,19 +310,6 @@ fn issuer_registry_events_match_their_fixtures() {
     }
 
     for event in deployment.capture(|| {
-        deployment.issuers.set_issuer_policy_commitments(
-            &second_id,
-            &earnproof_shared::IssuerPolicyCommitments {
-                encoding_version: 1,
-                category_commitment: hash(&deployment.env, 0xC6),
-                jurisdiction_commitment: hash(&deployment.env, 0xC7),
-            },
-        )
-    }) {
-        assert_matches_fixture(&deployment.env, &event);
-    }
-
-    for event in deployment.capture(|| {
         deployment
             .issuers
             .update_issuer(&deployment.issuer_id, &hash(&deployment.env, 0xC5))
@@ -355,6 +319,12 @@ fn issuer_registry_events_match_their_fixtures() {
 
     for event in deployment.capture(|| {
         deployment.issuers.suspend_issuer(
+            &soroban_sdk::BytesN::from_array(&deployment.env, &{
+                let mut a = [0xA5u8; 32];
+                a[1] = 6;
+                a[2] = 0;
+                a
+            }),
             &deployment.issuer_id,
             &soroban_sdk::BytesN::from_array(&deployment.env, &[1u8; 32]),
         )
@@ -364,6 +334,12 @@ fn issuer_registry_events_match_their_fixtures() {
 
     for event in deployment.capture(|| {
         deployment.issuers.reactivate_issuer(
+            &soroban_sdk::BytesN::from_array(&deployment.env, &{
+                let mut a = [0xA5u8; 32];
+                a[1] = 5;
+                a[2] = 0;
+                a
+            }),
             &deployment.issuer_id,
             &soroban_sdk::BytesN::from_array(&deployment.env, &[1u8; 32]),
         )
@@ -381,6 +357,12 @@ fn issuer_registry_events_match_their_fixtures() {
 
     for event in deployment.capture(|| {
         deployment.issuers.revoke_issuer(
+            &soroban_sdk::BytesN::from_array(&deployment.env, &{
+                let mut a = [0xA5u8; 32];
+                a[1] = 4;
+                a[2] = 0;
+                a
+            }),
             &deployment.issuer_id,
             &soroban_sdk::BytesN::from_array(&deployment.env, &[1u8; 32]),
         )
@@ -405,91 +387,29 @@ fn proof_registry_events_match_their_fixtures() {
 }
 
 #[test]
-fn dispute_resolution_preserves_v1_and_emits_v2_metadata_event() {
+fn history_retention_and_consent_withdrawal_events_match_their_fixtures() {
     let deployment = Deployment::new();
-    let proof_id = deployment.register_proof(0x25);
-    deployment
-        .proofs
-        .open_dispute(&proof_id, &deployment.issuer, &hash(&deployment.env, 0x26));
-    let reason = DisputeDecisionReason {
-        version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
-        code: earnproof_shared::DISPUTE_REASON_EVIDENCE_SUPPORTS_CLAIM,
-        reason_commitment: Some(hash(&deployment.env, 0x27)),
-    };
-    let events = deployment.capture(|| {
-        deployment.proofs.resolve_dispute(&proof_id, &reason);
-    });
-
-    assert_eq!(
-        events.len(),
-        2,
-        "both compatibility event versions are emitted"
-    );
-    for event in &events {
-        assert_matches_fixture(&deployment.env, event);
+    for event in deployment.capture(|| {
+        deployment.config.set_history_retention(
+            &earnproof_shared::HistoryKind::ConfigChange,
+            &16,
+            &0,
+        );
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
     }
 
-    let v1 = events
-        .iter()
-        .find(|event| event.is(&deployment.env, "dispute_resolved"))
-        .expect("legacy resolution event remains available");
-    assert_eq!(v1.field_count(&deployment.env), 4);
-
-    let v2 = events
-        .iter()
-        .find(|event| event.is(&deployment.env, "dispute_decision_committed_v2"))
-        .expect("version-2 decision event is emitted");
-    assert_eq!(v2.field_count(&deployment.env), 9);
-    assert_eq!(
-        v2.field::<earnproof_shared::DisputeStatus>(&deployment.env, "decision_status"),
-        Some(earnproof_shared::DisputeStatus::Resolved)
-    );
-    assert_eq!(v2.field::<u32>(&deployment.env, "reason_version"), Some(1));
-    assert_eq!(v2.field::<u32>(&deployment.env, "reason_code"), Some(1));
-    assert_eq!(
-        v2.field::<Option<soroban_sdk::BytesN<32>>>(&deployment.env, "reason_commitment"),
-        reason.reason_commitment
-    );
-    assert_eq!(
-        v2.field::<u32>(&deployment.env, "ledger"),
-        Some(deployment.env.ledger().sequence())
-    );
-    assert_eq!(
-        v2.field::<u64>(&deployment.env, "timestamp"),
-        Some(deployment.env.ledger().timestamp())
-    );
-    let metadata = deployment
-        .proofs
-        .get_dispute_decision_metadata(&proof_id)
-        .expect("decision metadata is queryable");
-    assert_eq!(
-        v2.field::<Address>(&deployment.env, "resolver"),
-        Some(metadata.resolver)
-    );
-    assert_eq!(
-        v2.field::<earnproof_shared::DisputeResolverRole>(&deployment.env, "resolver_role"),
-        Some(metadata.resolver_role)
-    );
-
-    let rejected_proof_id = deployment.register_proof(0x28);
-    deployment.proofs.open_dispute(
-        &rejected_proof_id,
-        &deployment.issuer,
-        &hash(&deployment.env, 0x29),
-    );
-    let rejected = deployment.capture(|| {
-        deployment.proofs.reject_dispute(
-            &rejected_proof_id,
-            &DisputeDecisionReason {
-                version: earnproof_shared::DISPUTE_DECISION_REASON_VERSION,
-                code: earnproof_shared::DISPUTE_REASON_CLAIM_UNSUBSTANTIATED,
-                reason_commitment: None,
-            },
+    let proof = deployment.register_proof(0x24);
+    for event in deployment.capture(|| {
+        deployment.proofs.withdraw_disclosure_consent(
+            &proof,
+            &BytesN::from_array(&deployment.env, &[0x31; 32]),
+            &1,
+            &1,
+            &BytesN::from_array(&deployment.env, &[0x32; 32]),
         );
-    });
-    assert_eq!(rejected.len(), 2);
-    for event in &rejected {
-        assert_matches_fixture(&deployment.env, event);
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
     }
 }
 

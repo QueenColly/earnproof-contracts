@@ -20,9 +20,8 @@ missing event is eventually noticed while a wrong one is silently committed.
    a failure event, and certainly not a success-shaped one.
 3. **Payload matches committed state.** Every field equals what was written to
    storage in the same invocation.
-4. **Deterministic ordering.** Events are emitted in the order defined by the
-   entry point. Resolve/reject calls emit the legacy event first and the v2
-   audit event second.
+4. **Deterministic ordering.** No entry point emits more than one event, so a
+   sequence of N operations yields N events in invocation order.
 5. **No protected data.** Payloads carry hashes, public addresses, version
    numbers, and timestamps. Never an amount, a memo, an identity, or a secret.
 
@@ -62,7 +61,6 @@ lineage link and `schema_approved` for the approval itself. A predecessor-less
 | `issuer_revoked` | `revoke_issuer` | `issuer_id_hash`, `effective_ledger`, `effective_timestamp`, `updated_at` |
 | `issuer_address_rotated` | `rotate_issuer_address` | `issuer_id_hash`, `old_address`, `new_address`, `updated_at` |
 | `issuer_signing_key_compromised` | `mark_signing_key_compromised` | `record`, `marked_by` |
-| `issuer_policy_commitments_changed` | `set_issuer_policy_commitments` | `issuer_id_hash`, `commitments`, `version`, `effective_ledger`, `effective_timestamp`, `changed_by` |
 | `governance_role_delay_changed` | `set_role_activation_delay` | `role`, `previous_delay_ledgers`, `new_delay_ledgers`, `changed_by` |
 
 `issuer_address_rotated` carries both addresses so an indexer can update its
@@ -88,53 +86,39 @@ documented `0` sentinel.
 
 | Topic | Emitted by | Payload |
 |---|---|---|
-| `proof_registered` | `register_proof` | `proof_id_hash`, `issuer_address`, `schema_version`, `created_ledger`, `created_at`, `expires_at`, `configuration_commitments`, `epoch` |
-| `proof_registered_with_payload` | `register_proof_with_payload` | `proof_id_hash`, `payload_len`, `payload_hash`, `configuration_commitments`, `epoch` |
-| `proof_registered_in_batch` | `register_proofs_batch` | `proof_id_hash`, `issuer_address`, `configuration_commitments` |
-| `dispute_evidence_committed` | `append_dispute_evidence` | `proof_id_hash`, `record` |
-| `proof_revoked` | `revoke_proof`, `admin_revoke_proof` | `proof_id_hash`, `revoked_at`, `revoked_ledger`, `by_admin`, `epoch` |
-| `dispute_resolved` | `resolve_dispute` | `proof_id_hash`, `resolved_by`, `resolved_by_class`, `resolved_at` (legacy shape) |
-| `dispute_rejected` | `reject_dispute` | `proof_id_hash`, `rejected_by`, `rejected_by_class`, `rejected_at` (legacy shape) |
-| `dispute_decision_committed_v2` | `resolve_dispute`, `reject_dispute` | `proof_id_hash`, `decision_status`, `reason_version`, `reason_code`, `reason_commitment`, `resolver`, `resolver_role`, `ledger`, `timestamp` |
+| `proof_registered` | `register_proof` | `proof_id_hash`, `issuer_address`, `schema_version`, `created_ledger`, `created_at`, `expires_at`, `epoch` |
+| `proof_revoked` | `revoke_proof`, `admin_revoke_proof`, `revoke_proof_at_policy`, `admin_revoke_proof_at_policy` | `proof_id_hash`, `revoked_at`, `revoked_ledger`, `by_admin`, `epoch`, `policy_version`, `actor_role`, `authorization_domain` |
+| `authority_policy_version_changed` | `set_authority_policy_version` | `previous_version`, `new_version`, `changed_by` |
+| `proof_activation_acknowledged` | `acknowledge_activation` | `proof_id_hash`, `acknowledged_by`, `actor_role`, `ledger`, `timestamp`, `sequence` |
 | `pause_acknowledged` | `acknowledge_pause` | `record` |
 | `pause_acknowledger_changed` | `set_pause_acknowledger` | `address`, `enabled`, `changed_by` |
 
 `proof_registered` carries the on-chain creation timing, sourced from the
-ledger, the immutable issuer/protocol/registry configuration digests and
-version references, and the registry epoch after the mutation. Its
-`configuration_commitments` field contains hashes, version numbers, and
-contract identities only; no policy preimages or private claims. `proof_revoked` carries both
+ledger, and the registry epoch after the mutation. `proof_revoked` carries both
 revocation timing values and the epoch after revocation. The timing lets
 verifiers understand when a proof became invalid without a follow-up query;
 `by_admin` distinguishes an administrator revocation from an issuer revocation.
 For a legacy record without a recorded revocation sequence,
 `revoked_ledger` is `0` and `revoked_at` remains authoritative.
 
-Resolve and reject emit their original v1-shaped event followed by
-`dispute_decision_committed_v2`. The v2 event commits a stable reason version
-and code, optional 32-byte off-chain rationale commitment, resolver address and
-role, ledger sequence, and timestamp. Reason strings and evidence are never
-accepted or emitted. Withdrawals do not carry a decision reason.
+### Lifecycle events shared by every contract
 
-Reason policy version 1 accepts code `1` (evidence supports the claim) for
-resolution. Rejection accepts `2` (claim unsubstantiated), `3` (duplicate),
-`4` (out of scope), or `5` (procedural). Unknown versions and outcome/code
-combinations fail before state changes.
+`issuer-registry`, `proof-registry`, and `protocol-config` publish the same
+lifecycle events with the same payloads.
 
-`issuer_policy_commitments_changed` announces a monotonic per-issuer policy
-version and its ledger/timestamp effective boundary. Only the opaque category
-and jurisdiction commitment hashes are published. `set_issuer_policy_commitments`
-retains the latest 16 summaries; `get_issuer_policy_version`,
-`get_issuer_policy_commitment_at_version`, and `get_issuer_policy_history`
-expose current and retained versions. Existing current-policy storage remains
-decodable; legacy issuers without a version counter report version `0` until
-their first successful update.
+| Topic | Emitted by | Payload |
+|---|---|---|
+| `deployment_domain_set` | `set_deployment_domain`, `initialize_in_domain` (proof-registry) | `deployment_domain`, `commitment`, `set_by` |
+| `storage_layout_migration_started` | `begin_layout_migration` | `from_layout`, `to_layout`, `started_by` |
+| `storage_layout_migrated` | `complete_layout_migration` | `from_layout`, `to_layout`, `completed_by` |
+| `decommission_grace_started` | `begin_decommission_grace` | `successor`, `grace_started_ledger`, `grace_ends_ledger`, `started_by` |
+| `contract_decommissioned` | `activate_successor`, `finalize_decommission` | unchanged payload of each contract |
 
-`append_dispute_evidence` accepts only a 32-byte hash and algorithm identifier.
-It records submitter role, per-dispute sequence, ledger, and timestamp. Evidence
-is append-only and limited to 16 entries per dispute round; evidence text,
-URLs, and claims are never accepted. `get_dispute_sequence` identifies the
-round for `get_dispute_evidence_history`, whose cursor is zero-based.
+Replays that the contract accepts as no-ops (the same deployment domain, the
+same pending layout target) publish nothing. See
+[`deployment-identity.md`](./deployment-identity.md),
+[`storage-layout-versions.md`](./storage-layout-versions.md), and
+[`decommission-grace.md`](./decommission-grace.md).
 
 ### Silent entry points
 
@@ -184,9 +168,9 @@ The failure classes covered by tests:
 
 ## Ordering
 
-Ordering is fixed by the ledger and by each entry point: events appear in the
-order their invocations were applied, with the two events from each
-resolve/reject call emitted consecutively.
+Ordering is fixed by the ledger, not by the contracts. Because no entry point
+emits more than one event, the guarantee reduces to: **events appear in the order
+their invocations were applied.**
 
 A multi-step operator sequence therefore reads exactly as issued. For the
 incident-response sequence — pause, suspend, revoke, unpause — an indexer sees:
@@ -281,3 +265,13 @@ that produced them; `Deployment::capture` in
 reason. A test that performs several operations and inspects the stream
 afterwards will see only the last one — and would pass vacuously while appearing
 to check a sequence.
+
+### Events added with retention bounds and consent withdrawal
+
+| Topic | Contract | Payload |
+|---|---|---|
+| `history_retention_set` | protocol-config | `kind`, `previous_max_entries`, `max_entries`, `revision`, `oldest_retained`, `changed_by` |
+| `consent_withdrawn` | proof-registry | `proof_id_hash`, `policy_hash`, `sequence`, `reason_code`, `commitment_hash` |
+
+Both are additive. See [history-retention-and-event-ranges.md](history-retention-and-event-ranges.md)
+and [consent-receipts.md](consent-receipts.md).
