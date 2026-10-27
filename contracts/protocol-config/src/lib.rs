@@ -1857,6 +1857,7 @@ impl ProtocolConfigContract {
         let policy = SchemaPolicy {
             proof_types: proof_types.clone(),
             max_validity_seconds,
+            evidence_bundles_enabled: false,
         };
         let key = DataKey::SchemaPolicy(version);
         env.storage().persistent().set(&key, &policy);
@@ -1896,6 +1897,42 @@ impl ProtocolConfigContract {
             );
         }
         policy
+    }
+
+    /// Admin-only: enable or disable evidence bundle commitments for proofs
+    /// registered under `version`. When disabled, no new bundle commitment
+    /// may be recorded for that schema; previously recorded commitments are
+    /// left intact.
+    pub fn set_schema_evidence_bundle_policy(
+        env: Env,
+        version: u32,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        Self::ensure_not_decommissioned(&env)?;
+        let admin = Self::get_admin(env.clone())?;
+        Self::require_auth(&admin);
+        Self::ensure_nonzero_version(version)?;
+        let key = DataKey::SchemaPolicy(version);
+        let mut policy = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Self::legacy_schema_policy(&env));
+        if policy.evidence_bundles_enabled == enabled {
+            return Err(ContractError::InvalidState);
+        }
+        policy.evidence_bundles_enabled = enabled;
+        env.storage().persistent().set(&key, &policy);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD_LEDGERS, TTL_EXTEND_TO_LEDGERS);
+        Self::bump_config_version(env.clone());
+        Self::append_config_history(
+            env.clone(),
+            ConfigChangeCategory::SchemaPolicy,
+            Self::commit(&env, (version, enabled)),
+        );
+        Ok(())
     }
 
     pub fn set_commitment_algorithm(
@@ -3873,6 +3910,7 @@ impl ProtocolConfigContract {
         SchemaPolicy {
             proof_types: soroban_sdk::vec![env, LEGACY_PROOF_TYPE],
             max_validity_seconds: MAX_SCHEMA_VALIDITY_SECONDS,
+            evidence_bundles_enabled: false,
         }
     }
 

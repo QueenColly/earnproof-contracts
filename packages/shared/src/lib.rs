@@ -289,6 +289,9 @@ pub const LEGACY_PROOF_TYPE: u32 = 0;
 pub const LEGACY_COMMITMENT_ALGORITHM: u32 = 0;
 pub const SHA256_COMMITMENT_ALGORITHM_V1: u32 = 1;
 
+/// Current encoding version for an evidence bundle commitment bound to a proof.
+pub const EVIDENCE_BUNDLE_COMMITMENT_VERSION: u32 = 1;
+
 /// Current encoding version for governed proof-dispute filing windows.
 pub const DISPUTE_FILING_POLICY_VERSION: u32 = 1;
 
@@ -384,6 +387,16 @@ pub struct ProofPayloadRecord {
 pub struct SchemaPolicy {
     pub proof_types: soroban_sdk::Vec<u32>,
     pub max_validity_seconds: u64,
+    pub evidence_bundles_enabled: bool,
+}
+
+/// A versioned, opaque commitment to an off-chain evidence bundle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceBundleCommitment {
+    pub version: u32,
+    pub algorithm: u32,
+    pub hash: BytesN<32>,
 }
 
 /// Immutable lifecycle timestamp used as the origin of a dispute filing window.
@@ -1096,6 +1109,14 @@ pub enum ProofError {
     InvalidConsentWithdrawalReason = 331,
     /// The requested event domain is not reported by this contract.
     UnsupportedEventDomain = 332,
+    /// The evidence bundle algorithm or encoding version is unsupported.
+    EvidenceBundleUnsupported = 333,
+    /// The evidence bundle commitment hash is all zeros.
+    EvidenceBundleZeroCommitment = 334,
+    /// An evidence bundle commitment is already recorded for this proof.
+    EvidenceBundleAlreadyCommitted = 335,
+    /// The proof schema does not permit evidence bundle commitments.
+    EvidenceBundlesNotEnabled = 336,
 }
 
 /// Versioned asset identifier accepted by context-aware proof registration.
@@ -1431,6 +1452,7 @@ pub struct SchemaActivationNotice {
     pub schema_version: u32,
     pub proposed_at: u64,
     pub activates_at: u64,
+    pub evidence_bundle: Option<EvidenceBundleCommitment>,
     pub minimum_notice_seconds: u64,
 }
 
@@ -2373,6 +2395,7 @@ pub struct ArchivedProofRecord {
     pub schema_version: u32,
     pub expired_at: u64,
     pub archived_at: u64,
+    pub evidence_bundle: Option<EvidenceBundleCommitment>,
 }
 
 /// On-chain record of an approved-but-not-yet-executed contract upgrade,
